@@ -5,6 +5,10 @@
 
 Contains code to print hello world on the duckiebot and the hostname environment variable
 
+The packages/412ex1/my_script.py contains the hello world implementation
+the launchers/launcher.sh contains the necessary duckietown environment setup
+the dockerfile was also updated
+
 ### Straight Line Driving  
 [![Straight Line Driving](https://img.youtube.com/vi/Iy8P9iYBFjc/0.jpg)](https://www.youtube.com/watch?v=Iy8P9iYBFjc)
 
