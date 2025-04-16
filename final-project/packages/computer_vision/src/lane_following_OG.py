@@ -59,7 +59,7 @@ class LaneFollowNode(DTROS):
         self.velocity = 0.3
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
 
-        self.P = 0.025
+        self.P = 0.028
         self.D = -0.0025
         self.I = 0
 
