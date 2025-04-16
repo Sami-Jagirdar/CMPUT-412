@@ -1,0 +1,147 @@
+ROSTOPICS
+/csc22926/auto_calibration_calculation_node/car_cmd
+/csc22926/auto_calibration_node/car_cmd
+/csc22926/button_driver_node/event
+/csc22926/camera_node/camera_info
+/csc22926/camera_node/image/compressed
+/csc22926/car_cmd_switch_node/cmd
+/csc22926/client_count
+/csc22926/connected_clients
+/csc22926/coordinator_node/car_cmd
+/csc22926/diagnostics/code/profiling
+/csc22926/diagnostics/ros/links
+/csc22926/diagnostics/ros/node
+/csc22926/diagnostics/ros/parameters
+/csc22926/diagnostics/ros/topics
+/csc22926/display_driver_node/fragments
+/csc22926/duckiebot_il_lane_following/car_cmd
+/csc22926/fsm_node/mode
+/csc22926/imu_node/data
+/csc22926/imu_node/temperature
+/csc22926/joint_states
+/csc22926/joy
+/csc22926/joy/set_feedback
+/csc22926/joy_mapper_node/car_cmd
+/csc22926/joy_mapper_node/joystick_override
+/csc22926/kinematics_node/velocity
+/csc22926/lane_controller_node/car_cmd
+/csc22926/lane_recovery_node/car_cmd
+/csc22926/lane_supervisor_node/car_cmd
+/csc22926/led_emitter_node/led_pattern
+/csc22926/left_wheel_encoder_node/tick
+/csc22926/right_wheel_encoder_node/tick
+/csc22926/simple_stop_controller_node/car_cmd
+/csc22926/velocity_to_pose_node/pose
+/csc22926/wheels_driver_node/emergency_stop
+/csc22926/wheels_driver_node/wheels_cmd
+/csc22926/wheels_driver_node/wheels_cmd_executed
+/diagnostics
+/rosout
+/rosout_agg
+/tf
+/tf_static
+
+https://docs.opencv.org/4.x/d4/d13/tutorial_py_filtering.html
+
+https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+We did undistortion using remapping to be able to increase fps
+
+Undistortion images take before preprocessing
+red: [0,95,108] to [8,171,255]
+or [0. 84, 219] to [179,173,255]
+
+blue: [85,110,108] to [114, 238, 210]
+
+green: [44,56,140] to [102, 106, 188]
+
+red: [0,121,179] to [179, 202, 255]
+or [0,128, 194] to [179, 164, 255]
+or [0, 131, 194] to [179, 174, 255]
+or [0, 131, 189] to [179, 161, 230]
+
+
+red: [0, 84, 240] to [179, 176, 255]
+or [0, 118, 164] to [179, 200, 233]
+or [0, 111, 162] to [179, 255, 255]
+[0, 138, 230] to [179, 168, 255]
+
+yellow: [20, 101, 105] to [29, 255, 255]
+white: [121, 13, 183] to [127, 39, 255]
+or [122, 0, 202] to [123, 36, 236]
+or [121, 31, 193] to [124, 36, 232]
+or [112, 24, 173] to [125, 205, 255]
+or [118, 29, 174] to [134, 46, 213]
+or [115, 24, 221] to [127, 49, 238]
+or [122, 25, 168] to [134, 34, 247]
+or [123, 24, 202] to [132, 124, 255]
+or [123, 8, 181] to [151, 56, 219]
+
+homography:
+- -4.99621433668091e-05
+- 0.0012704090688819693
+- 0.2428235605203261
+- -0.001999628080487182
+- -5.849807527639727e-05
+- 0.6400119336043912
+- 0.0003409556379103712
+- 0.0174415825291776
+- -3.2316507961510252
+
+used chatgpt to understand how services work for part 1.6 to combine previous parameters
+Note that to create a custom service that exchanges custom requests and responses, must create a .srv file in your package and include it in the .xml and CMakeLists files
+Always start the service server node first (lane_detection in our case)
+
+Ideally, which was my initial plan was to calculate the midpoint between white lane and yellow lanes at all time and use that to control.
+However, because the white lane dusty and long, it was hard to get a stable contour detection leading to slightly irregular behaviour
+For the purposes of this lab, I decided to make it prioritize following the left lane to a certain distance even if the white lane is also detected.
+Then only use the white lane if the yellow lane is not detected.
+This approach works perfectly, but it assumes that I know an estimation of the width of the road (distance between both lanes) beforehand instead of dynamically using the lenghts of both lanes
+
+
+Tried command line arg, didn't work
+
+for white detection, used a higher range and got the ground point like normal
+
+The common advice often given for most systems is to increase the Proportional setting, until you get good performance. 
+If you have to increase it so far that overshoot occurs (weaving, in the steering example) then start to add a little Derivative to stop the overshoot. 
+Then add more P+D to get better performance. 
+If you notice a state where it steers towards the centre but slows before getting there, start to add some I... but not so much that weaving begins again.
+
+homography:
+[-4.4176150901508024e-05,
+0.0004846965281425196,
+0.30386285736827856,
+-0.0015921548874079563,
+1.0986376221035314e-05,
+0.4623061006515125,
+-0.00029009271219456394,
+0.011531091762722323,
+-1.4589875279686733,]
+
+
+
+        # control LEDs based on detected colors
+
+        # if self.detected_lanes['red']['dimensions'][0]*self.detected_lanes['red']['dimensions'][1] > 500:
+        #     # set led colors to red if red lane detected at a large size
+        #     self.set_led_color([[1, 0, 0, 1],
+        #                         [1, 0, 0, 1],
+        #                         [1, 0, 0, 1],
+        #                         [1, 0, 0, 1],
+        #                         [1, 0, 0, 1],])
+            
+        # elif self.detected_lanes['green']['dimensions'][0]*self.detected_lanes['green']['dimensions'][1] > 500:
+        #     # set led colors to green if green lane detected at a large size
+        #     self.set_led_color([[0, 1, 0, 1],
+        #                         [0, 1, 0, 1],
+        #                         [0, 1, 0, 1],
+        #                         [0, 1, 0, 1],
+        #                         [0, 1, 0, 1],])
+            
+        # elif self.detected_lanes['blue']['dimensions'][0]*self.detected_lanes['blue']['dimensions'][1] > 500:
+        #     # set led colors to blue if blue lane detected at a large size
+        #     self.set_led_color([[0, 0, 1, 1],
+        #                         [0, 0, 1, 1],
+        #                         [0, 0, 1, 1],
+        #                         [0, 0, 1, 1],
+        #                         [0, 0, 1, 1],])

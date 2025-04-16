@@ -1,0 +1,12 @@
+<package>
+  <name>computer_vision</name>
+  <version>0.1.0</version>
+  <description>
+  This package contains the code for solving basic computer vision tasks.
+  </description>
+  <maintainer email="jagirdar@ualberta.ca">Sami Jagirdar and Basia Ofovwe</maintainer>
+  <license>None</license>
+  <build_depend>message_generation</build_depend>
+  <run_depend>message_runtime</run_depend>
+  <buildtool_depend>catkin</buildtool_depend>
+</package>
