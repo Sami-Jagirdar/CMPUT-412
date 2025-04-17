@@ -1,0 +1,11 @@
+<package>
+  <name>final_project</name>
+  <version>0.1.0</version>
+  <description>
+  This package contains node for a Duckiebot obstacle course.
+  </description>
+  <maintainer email="jagirdar@ualberta.ca">Sami Jagirdar</maintainer>
+  <license>None</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+</package>

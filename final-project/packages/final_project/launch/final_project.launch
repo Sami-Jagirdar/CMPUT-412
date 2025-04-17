@@ -1,0 +1,7 @@
+<launch>
+
+  <group ns="$(arg veh)">
+    <node pkg="final_project" type="stage1.py" name="tail_duck_node" output="screen"/>
+  </group>
+
+</launch>
