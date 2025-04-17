@@ -89,38 +89,61 @@ class LaneFollowNode(DTROS):
         crop = img[300:-1, :, :]
         crop_width = crop.shape[1]
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
-        crop = cv2.bitwise_and(crop, crop, mask=mask)
-        contours, hierarchy = cv2.findContours(mask,
-                                               cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_NONE)
 
-        # Search for lane in front
-        max_area = 20
-        max_idx = -1
-        for i in range(len(contours)):
-            area = cv2.contourArea(contours[i])
-            if area > max_area:
-                max_idx = i
-                max_area = area
+        # Try detecting yellow lane first
+        yellow_mask = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
+        # yellow_contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        # Fallback to white lane if yellow not detected
+        def find_largest_contour(mask):
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            max_area = 20
+            max_idx = -1
+            for i in range(len(contours)):
+                area = cv2.contourArea(contours[i])
+                if area > max_area:
+                    max_idx = i
+                    max_area = area
+            return contours, max_idx
+
+        # Search yellow lane first
+        contours, max_idx = find_largest_contour(yellow_mask)
+        following_white = False
+
+        if max_idx != -1:
+            mask_to_use = yellow_mask
+        else:
+            # Try white lane
+            white_lower = np.array([120, 18, 155], np.uint8)
+            white_upper = np.array([128, 39, 255], np.uint8)
+            white_mask = cv2.inRange(hsv, white_lower, white_upper)
+            contours, max_idx = find_largest_contour(white_mask)
+            mask_to_use = white_mask
+            following_white = max_idx != -1
 
         if max_idx != -1:
             M = cv2.moments(contours[max_idx])
             try:
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
-                self.proportional = cx - int(crop_width / 2) + self.offset
+
+                # If following white lane, invert the offset
+                offset = -(self.offset+50) if following_white else self.offset
+                self.proportional = cx - int(crop_width / 2) + offset
+
                 if DEBUG:
-                    cv2.drawContours(crop, contours, max_idx, (0, 255, 0), 3)
+                    cv2.drawContours(crop, contours, max_idx, (255, 0, 0) if following_white else (0, 255, 0), 3)
                     cv2.circle(crop, (cx, cy), 7, (0, 0, 255), -1)
             except:
-                pass
+                self.proportional = None
         else:
             self.proportional = None
 
         if DEBUG:
-            rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(crop))
+            debug_masked = cv2.bitwise_and(crop, crop, mask=mask_to_use)
+            rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(debug_masked))
             self.pub.publish(rect_img_msg)
+
 
     def drive(self):
         if self.obj_stop:
