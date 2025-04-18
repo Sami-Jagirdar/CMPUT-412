@@ -13,7 +13,7 @@ from cv_bridge import CvBridge
 from turbojpeg import TurboJPEG
 import numpy as np
 
-DEBUG_LANE_FOLLOW = True
+DEBUG_LANE_FOLLOW = False
 DEBUG_TAIL = False
 
 class TailDuckNode(DTROS):
@@ -31,9 +31,7 @@ class TailDuckNode(DTROS):
         self.cbParametersChanged()
         self.last_seen = rospy.Time(0)
         self.tail_timeout = rospy.Duration(0.65)
-        self.tailing = False
         self.last_tail_error = (0,0)
-        self.target_width  = 100.0
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
@@ -44,6 +42,11 @@ class TailDuckNode(DTROS):
         self.last_error = 0
         self.integral = 0
         self.last_time = rospy.get_time()
+
+        # ---- Red intersection setup
+        self.stopped_at_red = False
+        self.time_of_red_stop = rospy.get_time()
+        self.red_cooldown_duration = rospy.Duration(3.5)
 
         self.bridge = CvBridge()
         self.jpeg = TurboJPEG()
@@ -69,7 +72,7 @@ class TailDuckNode(DTROS):
                                  ]
         self.count = 0
         
-        self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=10)
+        self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=1)
 
         self.nav = NavigationControl()
         self.velocity = 0.3
@@ -77,6 +80,15 @@ class TailDuckNode(DTROS):
         self.nav.publish_velocity(self.velocity, self.omega)
 
         rospy.on_shutdown(self.hook)
+
+    def stop_at_red(self):
+        if not self.stopped_at_red:
+            self.time_of_red_stop = rospy.get_time()
+            self.nav.stop(2)
+            self.stopped_at_red = True
+
+        if rospy.get_time() - self.time_of_red_stop() > self.red_cooldown_duration:
+            self.stopped_at_red = False
 
     def publish_LED_pattern(self):
         # Publish the LED pattern to the led_emitter_node
@@ -207,8 +219,9 @@ class TailDuckNode(DTROS):
                 rospy.loginfo("Not detected")
 
         # --- 3) Always publish debug image ---
-        imgmsg = self.bridge.cv2_to_compressed_imgmsg(debug)
-        self.pub_circlepattern_image.publish(imgmsg)
+        if DEBUG_TAIL:
+            imgmsg = self.bridge.cv2_to_compressed_imgmsg(debug)
+            self.pub_circlepattern_image.publish(imgmsg)
 
         return result
 
@@ -305,9 +318,10 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
-        # stopline_detected, distance = self.detect_red_intersection(image_cv)
-        # if stopline_detected and distance < 30:
-        #     self.nav.stop(3)
+        # Always stop at red first
+        stopline_detected, distance = self.detect_red_intersection(image_cv)
+        if stopline_detected and distance < 30:
+            self.stop_at_red()
 
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
@@ -342,19 +356,14 @@ class TailDuckNode(DTROS):
 
         tail = self.detect_bot(image_cv)
         if tail is not None:
-
             # self.set_led_color([
             #                     [0, 0, 0, 0],
+            #                     [0, 0, 1, 0],
             #                     [0, 0, 0, 0],
             #                     [0, 0, 1, 1],
-            #                     [0, 0, 0, 0],
-            #                     [0, 0, 1, 1],
+            #                     [0, 0, 0, 1],
             #                      ])
-            
             error_distance, offset = tail
-
-            # if offset > 140:
-            #     return
 
             # Tuning parameters
             Kp_dist = 0.013
@@ -372,10 +381,6 @@ class TailDuckNode(DTROS):
             return
         # else:
         #     self.set_led_color(self.light_color_list)
-        
-        
-        # self.nav.publish_velocity(0,0)
-
 
 
     def hook(self):
