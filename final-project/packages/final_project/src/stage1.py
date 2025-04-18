@@ -33,12 +33,12 @@ class TailDuckNode(DTROS):
         self.tail_timeout = rospy.Duration(0.65)
         self.tailing = False
         self.last_tail_error = (0,0)
-        self.target_width  = 120.0
+        self.target_width  = 100.0
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 220
-        self.P = 0.028
+        self.offset = 240
+        self.P = 0.025
         self.D = -0.0025
         self.I = 0
         self.last_error = 0
@@ -67,11 +67,12 @@ class TailDuckNode(DTROS):
                                 [0, 0, 0, 0],
                                 [0, 0, 0, 0],
                                  ]
+        self.count = 0
         
         self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=10)
 
         self.nav = NavigationControl()
-        self.velocity = 0.3
+        self.velocity = 0.25
         self.omega = 0
         self.nav.publish_velocity(self.velocity, self.omega)
 
@@ -142,7 +143,7 @@ class TailDuckNode(DTROS):
         Runs a oneshot grid detection on a prefiltered image, logs timing, and
         always publishes a debug view showing either the corners+width or "No pattern".
         """
-        # self.set_led_color(self.light_color_list)
+        self.set_led_color(self.light_color_list)
 
         # --- 1) Pre‑process ---
         #  a) Gaussian blur to smooth noise
@@ -295,6 +296,11 @@ class TailDuckNode(DTROS):
     def image_callback(self, msg):
         image_cv = self.bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
         now = rospy.Time.now()
+
+        if self.count<1:
+            self.set_led_color(self.light_color_list)
+            self.count = 1
+
         if now - self.last_stamp < self.publish_duration:
             return
         self.last_stamp = now
@@ -303,59 +309,61 @@ class TailDuckNode(DTROS):
         # if stopline_detected and distance < 30:
         #     self.nav.stop(3)
 
-        # lane-following takes precedence
-        # if (self.tailing and (now - self.last_seen) >= self.tail_timeout) or not self.tailing:
-        #     self.tailing = False
-        #     self.lane_detect(image_cv)
+        # lane-follow if bot not seen
+        if ((now - self.last_seen) >= self.tail_timeout):
+            # self.tailing = False
+            self.lane_detect(image_cv)
 
-        #     if self.proportional is None:
-        #         # v = self.velocity
-        #         self.omega = 0
-        #         self.last_error = 0
-        #         self.integral = 0
-        #     else:
-        #         current_time = rospy.get_time()
-        #         dt = current_time - self.last_time
-        #         if dt > 0:
-        #             d_error = (self.proportional - self.last_error) / dt
-        #             self.integral += self.proportional * dt
-        #         else:
-        #             d_error = 0
+            if self.proportional is None:
+                # v = self.velocity
+                self.omega = 0
+                self.last_error = 0
+                self.integral = 0
+            else:
+                current_time = rospy.get_time()
+                dt = current_time - self.last_time
+                if dt > 0:
+                    d_error = (self.proportional - self.last_error) / dt
+                    self.integral += self.proportional * dt
+                else:
+                    d_error = 0
 
-        #         Pterm = -self.proportional * self.P
-        #         Dterm = d_error * self.D
-        #         Iterm = self.I * self.integral
+                Pterm = -self.proportional * self.P
+                Dterm = d_error * self.D
+                Iterm = self.I * self.integral
 
-        #         # v = self.velocity
-        #         self.omega = Pterm + Dterm + Iterm
+                # v = self.velocity
+                self.omega = Pterm + Dterm + Iterm
 
-        #         self.last_error = self.proportional
-        #         self.last_time = current_time
+                self.last_error = self.proportional
+                self.last_time = current_time
+            rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
+            self.nav.publish_velocity(self.velocity, self.omega)
 
         tail = self.detect_bot(image_cv)
         if tail is not None:
-            self.tailing = True
-            self.last_seen = rospy.Time.now()
             error_distance, offset = tail
+
+            # if offset > 140:
+            #     return
 
             # Tuning parameters
             Kp_dist = 0.01
-            Kp_angle = -0.05
+            Kp_angle = -0.005
 
             # Compute velocity and omega based on error
             v = Kp_dist * error_distance
             omega = Kp_angle * offset
 
             # Limit speed to avoid overshooting
-            v = max(min(v, 0.35), 0.05) if v > 0 else 0
+            v = max(min(v, 0.3), 0.05) if v > 0 else 0
 
             rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
-            # self.nav.publish_velocity(v, omega)
+            self.nav.publish_velocity(v, omega)
             return
         
-        rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
-        # self.nav.publish_velocity(self.velocity, self.omega)
-        self.nav.publish_velocity(0,0)
+        
+        # self.nav.publish_velocity(0,0)
 
 
 
