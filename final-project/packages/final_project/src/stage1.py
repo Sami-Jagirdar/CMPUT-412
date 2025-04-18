@@ -37,7 +37,7 @@ class TailDuckNode(DTROS):
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 240
+        self.offset = 220
         self.P = 0.025
         self.D = -0.0025
         self.I = 0
@@ -72,7 +72,7 @@ class TailDuckNode(DTROS):
         self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=10)
 
         self.nav = NavigationControl()
-        self.velocity = 0.25
+        self.velocity = 0.3
         self.omega = 0
         self.nav.publish_velocity(self.velocity, self.omega)
 
@@ -143,7 +143,7 @@ class TailDuckNode(DTROS):
         Runs a oneshot grid detection on a prefiltered image, logs timing, and
         always publishes a debug view showing either the corners+width or "No pattern".
         """
-        self.set_led_color(self.light_color_list)
+        # self.set_led_color(self.light_color_list)
 
         # --- 1) Pre‑process ---
         #  a) Gaussian blur to smooth noise
@@ -171,11 +171,10 @@ class TailDuckNode(DTROS):
         debug = image_cv.copy()
 
         if found:
-
             # compute width + offset
             xs = centers[:, 0, 0]
             pattern_width = float(np.max(xs) - np.min(xs))
-            error_distance = 120.0 - pattern_width
+            error_distance = 100.0 - pattern_width
             center_offset  = float(np.mean(xs) - (image_cv.shape[1] / 2))
 
             # annotate
@@ -205,6 +204,7 @@ class TailDuckNode(DTROS):
                 result = self.last_pattern
             else:
                 result = None
+                rospy.loginfo("Not detected")
 
         # --- 3) Always publish debug image ---
         imgmsg = self.bridge.cv2_to_compressed_imgmsg(debug)
@@ -342,13 +342,22 @@ class TailDuckNode(DTROS):
 
         tail = self.detect_bot(image_cv)
         if tail is not None:
+
+            # self.set_led_color([
+            #                     [0, 0, 0, 0],
+            #                     [0, 0, 0, 0],
+            #                     [0, 0, 1, 1],
+            #                     [0, 0, 0, 0],
+            #                     [0, 0, 1, 1],
+            #                      ])
+            
             error_distance, offset = tail
 
             # if offset > 140:
             #     return
 
             # Tuning parameters
-            Kp_dist = 0.01
+            Kp_dist = 0.013
             Kp_angle = -0.005
 
             # Compute velocity and omega based on error
@@ -361,6 +370,8 @@ class TailDuckNode(DTROS):
             rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
             self.nav.publish_velocity(v, omega)
             return
+        # else:
+        #     self.set_led_color(self.light_color_list)
         
         
         # self.nav.publish_velocity(0,0)
