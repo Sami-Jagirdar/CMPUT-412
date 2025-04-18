@@ -12,7 +12,7 @@ from turbojpeg import TurboJPEG
 import numpy as np
 
 DEBUG_LANE_FOLLOW = True
-DEBUG_TAIL = True
+DEBUG_TAIL = False
 
 class TailDuckNode(DTROS):
     def __init__(self, node_name):
@@ -59,7 +59,7 @@ class TailDuckNode(DTROS):
         self.log("Detection Initialization completed.")
 
         self.nav = NavigationControl()
-        self.velocity = 0.0
+        self.velocity = 0.25
         self.omega = 0
         self.nav.publish_velocity(self.velocity, self.omega)
 
@@ -158,6 +158,8 @@ class TailDuckNode(DTROS):
     def detect_bot(self, image_cv):
         """
         Callback for processing a image which potentially contains a back pattern. Processes the image only if
+        sufficient time has passed since processing the previous image (relative to the chosen processing frequency).
+
         The pattern detection is performed using OpenCV's `findCirclesGrid <https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html?highlight=solvepnp#findcirclesgrid>`_ function.
 
         Args:
@@ -214,31 +216,8 @@ class TailDuckNode(DTROS):
         # if stopline_detected and distance < 30:
         #     self.nav.stop(3)
 
-        # First check if bot was detected
-        tail = self.detect_bot(image_cv)
+        # lane-following takes precedence
 
-        if tail is not None:
-            self.tailing = True
-            self.last_seen = rospy.Time.now()
-            error_distance, offset = tail
-
-            # Tuning parameters
-            Kp_dist = 0.01
-            Kp_angle = -0.05
-
-            # Compute velocity and omega based on error
-            v = Kp_dist * error_distance
-            omega = Kp_angle * offset
-
-            # Limit speed to avoid overshooting
-            v = max(min(v, 0.35), 0.05) if v > 0 else 0
-
-            rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
-            # self.nav.publish_velocity(v, omega)
-            self.nav.publish_velocity(0, 0)
-            return
-        
-        # If bot hasn't been detected for tail_timout=0.5 seconds, continue lane following
         if (self.tailing and (now - self.last_seen) >= self.tail_timeout) or not self.tailing:
             self.tailing = False
             self.lane_detect(image_cv)
@@ -266,9 +245,34 @@ class TailDuckNode(DTROS):
 
                 self.last_error = self.proportional
                 self.last_time = current_time
+
+        tail = self.detect_bot(image_cv)
+
+        if tail is not None:
+            self.tailing = True
+            self.last_seen = rospy.Time.now()
+            error_distance, offset = tail
+            # if error_distance < 10:
+            #     self.nav.publish_velocity(0,0)
+            #     return
+
+            # Tuning parameters
+            Kp_dist = 0.01
+            Kp_angle = -0.05
+
+            # Compute velocity and omega based on error
+            v = Kp_dist * error_distance
+            omega = Kp_angle * offset
+
+            # Limit speed to avoid overshooting
+            v = max(min(v, 0.35), 0.05) if v > 0 else 0
+
+            rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
+            self.nav.publish_velocity(v, omega)
+            return
         
-            rospy.loginfo(f"[Lane Following] v={v:.2f}, omega={omega:.2f}")
-            # self.nav.publish_velocity(v, omega)
+        rospy.loginfo(f"[Lane Following] v={v:.2f}, omega={omega:.2f}")
+        self.nav.publish_velocity(v, omega)
 
 
     def hook(self):
