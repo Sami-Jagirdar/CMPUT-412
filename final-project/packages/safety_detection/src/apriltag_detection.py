@@ -36,10 +36,10 @@ class ApriltagNode(DTROS):
         self.last_tag_id = -1
 
         self.tagid_to_led = {
-            -1: "white",
-            169: "red",
-            153: "blue",
-            94: "green"
+            -1: "WHITE",
+            21: "RED",
+            59: "BLUE",
+            200: "GREEN"
         }
 
         # subscribe to camera feed
@@ -222,6 +222,23 @@ class ApriltagNode(DTROS):
         stopline_detected, distance = self.detect_line(col_img)
         if stopline_detected and distance < 30:
             self.execute_red_line_behavior()
+
+            # logic if a tag was seen
+            if tag_id is not None:
+                if tag_id == 21:
+                    rospy.loginfo("Turning LEFT at AprilTag 21")
+                    self.nav.turn_left()
+                elif tag_id == 59:
+                    rospy.loginfo("Turning RIGHT at AprilTag 59")
+                    self.nav.turn_right()
+                elif tag_id == 200:
+                    rospy.loginfo("Going STRAIGHT at AprilTag 200")
+                    self.nav.move_straight(0.5)
+                else:
+                    rospy.logwarn(f"Unknown tag ID: {tag_id}")
+            else:
+                rospy.loginfo("No tag seen. Proceeding forward.")
+
             self.last_tag_id = -1
 
 
