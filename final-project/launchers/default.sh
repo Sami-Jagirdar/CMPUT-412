@@ -13,7 +13,8 @@ dt-launchfile-init
 # NOTE: Use `dt-exec COMMAND` to run the main process (blocking process)
 
 # launching app
-dt-exec roslaunch safety_detection safety_detection.launch veh:=$VEHICLE_NAME 
+# dt-exec roslaunch safety_detection safety_detection.launch veh:=$VEHICLE_NAME 
+dt-exec roslaunch final_project final_project.launch veh:=$VEHICLE_NAME 
 
 # TBA
 
