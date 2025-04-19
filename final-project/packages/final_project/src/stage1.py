@@ -54,7 +54,7 @@ class TailDuckNode(DTROS):
         # ---- Red intersection setup
         self.stopped_at_red = False
         self.time_of_red_stop = rospy.get_time()
-        self.red_cooldown_duration = 7
+        self.red_cooldown_duration = 10
         self.red_stops_count = 0
 
         self.bridge = CvBridge()
@@ -99,9 +99,8 @@ class TailDuckNode(DTROS):
         if not self.stopped_at_red:
             rospy.loginfo("Stopping at red")
             self.time_of_red_stop = rospy.get_time()
-            self.nav.stop(2)
+            self.nav.stop(3)
             self.stopped_at_red = True
-            self.red_stops_count += 1
 
         if rospy.get_time() - self.time_of_red_stop > self.red_cooldown_duration:
             rospy.loginfo("Cooldown period ended")
@@ -135,7 +134,7 @@ class TailDuckNode(DTROS):
 
     def cbTOF(self, msg):
         if 0.05 < msg.range <= 0.2:
-            rospy.loginfo(f"Detected object at : {msg.range}")
+            # rospy.loginfo(f"Detected object at : {msg.range}")
             self.stop_bot = True
         else:
             self.stop_bot = False
@@ -199,7 +198,7 @@ class TailDuckNode(DTROS):
             blobDetector=self.simple_blob_detector,
         )
         dt = (rospy.get_time() - t0) * 1000
-        rospy.loginfo(f"CircleGrid dt={dt:.1f}ms, found={found}")
+        # rospy.loginfo(f"CircleGrid dt={dt:.1f}ms, found={found}")
 
         # Prepare a debug copy
         debug = image_cv.copy()
@@ -239,7 +238,7 @@ class TailDuckNode(DTROS):
                 result = self.last_pattern
             else:
                 result = None
-                rospy.loginfo("Not detected")
+                # rospy.loginfo("Not detected")
 
         # --- 3) Always publish debug image ---
         # if DEBUG_TAIL:
@@ -384,22 +383,31 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
+        
         # Always stop at red if not stopped already
         stopline_detected, distance = self.detect_red_intersection(image_cv)
         if stopline_detected and distance < 30:
+            blue_direction = self.detect_blue_bot(image_cv)
             self.stop_at_red()
         
         # First red encountered, turn in the direction of leading duckiebot
-            if self.red_stops_count == 1:
-                blue_direction = self.detect_blue_bot(image_cv)
+            if self.red_stops_count == 0:
                 if blue_direction == "left":
-                    self.nav.turn_left(0.35, 1.5, extra=1)
+                    # self.nav.move_straight(0.3)
+                    self.nav.turn_left(0.4, 1.5, extra=1.0)
+                    rospy.loginfo("Left turn")
                 elif blue_direction == "right":
                     self.nav.move_straight(0.35)
-                    self.nav.turn_right(0, -2.2)
-                else: return # Don't move until the bot was detected
+                    self.nav.turn_right(0, -2.5)
+                    rospy.loginfo("Right turn")
                 self.red_stops_count += 1
                 return
+            # elif self.red_stops_count == 2:
+            #     self.nav.turn_left(0, -2.5)
+            #     self.nav.move_straight(0.4)
+            #     return
+            rospy.loginfo(self.red_stops_count)
+
 
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
@@ -429,7 +437,7 @@ class TailDuckNode(DTROS):
 
                 self.last_error = self.proportional
                 self.last_time = current_time
-            rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
+            # rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
             self.nav.publish_velocity(self.velocity, self.omega)
 
         tail = self.detect_bot(image_cv)
@@ -459,7 +467,7 @@ class TailDuckNode(DTROS):
                 self.nav.publish_velocity(0,0)
                 return
 
-            rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
+            # rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
             self.nav.publish_velocity(v, omega)
             return
         # else:
