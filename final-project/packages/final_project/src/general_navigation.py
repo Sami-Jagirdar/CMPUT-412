@@ -41,8 +41,9 @@ class NavigationControl():
             
         self.stop(0.5)
         
-    def turn_right(self, speed=0.3, omega=-2.0):
-        duration = (math.pi/2) / abs(omega)
+    def turn_right(self, speed=0.3, omega=-2.0, extra = 0):
+        duration = (math.pi/2) / abs(omega) # Unreliable unfortunately
+        duration += extra
         start_time = rospy.get_time()
         
         while (rospy.get_time() - start_time) < duration:
@@ -51,8 +52,9 @@ class NavigationControl():
             
         self.stop(0.5)
         
-    def turn_left(self, speed=0.3, omega=2.0):
-        duration = (math.pi/2) / abs(omega)
+    def turn_left(self, speed=0.3, omega=2.0, extra = 0):
+        duration = (math.pi/2) / abs(omega) # Unreliable unfortunately
+        duration += extra
         start_time = rospy.get_time()
         
         while (rospy.get_time() - start_time) < duration:

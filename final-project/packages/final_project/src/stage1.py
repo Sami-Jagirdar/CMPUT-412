@@ -3,7 +3,7 @@
 import rospy
 import os
 from duckietown.dtros import DTROS, NodeType
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Range
 from geometry_msgs.msg import Point32
 import cv2
 from general_navigation import NavigationControl
@@ -14,7 +14,7 @@ from turbojpeg import TurboJPEG
 import numpy as np
 
 DEBUG_LANE_FOLLOW = False
-DEBUG_TAIL = False
+DEBUG_TAIL = True
 
 class TailDuckNode(DTROS):
     def __init__(self, node_name):
@@ -22,6 +22,13 @@ class TailDuckNode(DTROS):
         self.node_name = node_name
         self.veh = os.environ['VEHICLE_NAME']
         self.process_frequency = 5
+
+        # --- General collision prevention setup ---
+        self.stop_bot = True
+        self.tof_sub = rospy.Subscriber("/" + self.veh + "/front_center_tof_driver_node/range",
+                                            Range,
+                                            self.cbTOF,
+                                            queue_size=1)
 
         # --- Duckiebot Tailing setup ---
         self.last_stamp = rospy.Time.now()
@@ -32,10 +39,11 @@ class TailDuckNode(DTROS):
         self.last_seen = rospy.Time(0)
         self.tail_timeout = rospy.Duration(0.65)
         self.last_tail_error = (0,0)
+        self.last_offset = 0
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 220
+        self.offset = 230
         self.P = 0.025
         self.D = -0.0025
         self.I = 0
@@ -46,7 +54,8 @@ class TailDuckNode(DTROS):
         # ---- Red intersection setup
         self.stopped_at_red = False
         self.time_of_red_stop = rospy.get_time()
-        self.red_cooldown_duration = rospy.Duration(3.5)
+        self.red_cooldown_duration = 7
+        self.red_stops_count = 0
 
         self.bridge = CvBridge()
         self.jpeg = TurboJPEG()
@@ -75,19 +84,22 @@ class TailDuckNode(DTROS):
         self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=1)
 
         self.nav = NavigationControl()
-        self.velocity = 0.3
+        self.velocity = 0.28
         self.omega = 0
-        self.nav.publish_velocity(self.velocity, self.omega)
+        self.nav.publish_velocity(0, self.omega)
 
         rospy.on_shutdown(self.hook)
 
     def stop_at_red(self):
         if not self.stopped_at_red:
+            rospy.loginfo("Stopping at red")
             self.time_of_red_stop = rospy.get_time()
             self.nav.stop(2)
             self.stopped_at_red = True
+            self.red_stops_count += 1
 
-        if rospy.get_time() - self.time_of_red_stop() > self.red_cooldown_duration:
+        if rospy.get_time() - self.time_of_red_stop > self.red_cooldown_duration:
+            rospy.loginfo("Cooldown period ended")
             self.stopped_at_red = False
 
     def publish_LED_pattern(self):
@@ -115,6 +127,13 @@ class TailDuckNode(DTROS):
                 self.light_color_list[i] = colors[i]
         
         self.publish_LED_pattern()
+
+    def cbTOF(self, msg):
+        if 0.05 < msg.range <= 0.2:
+            rospy.loginfo(f"Detected object at : {msg.range}")
+            self.stop_bot = True
+        else:
+            self.stop_bot = False
 
     def cbParametersChanged(self):
         self.publish_duration = rospy.Duration.from_sec(1.0 / self.process_frequency)
@@ -155,8 +174,6 @@ class TailDuckNode(DTROS):
         Runs a oneshot grid detection on a prefiltered image, logs timing, and
         always publishes a debug view showing either the corners+width or "No pattern".
         """
-        # self.set_led_color(self.light_color_list)
-
         # --- 1) Pre‑process ---
         #  a) Gaussian blur to smooth noise
         blurred = cv2.GaussianBlur(image_cv, (5, 5), 0)
@@ -188,11 +205,12 @@ class TailDuckNode(DTROS):
             pattern_width = float(np.max(xs) - np.min(xs))
             error_distance = 100.0 - pattern_width
             center_offset  = float(np.mean(xs) - (image_cv.shape[1] / 2))
+            self.last_offset = center_offset
 
             # annotate
             cv2.drawChessboardCorners(debug, tuple(self.circlepattern_dims), centers, found)
             cv2.putText(
-                debug, f"W: {pattern_width:.1f}px",
+                debug, f"W: {pattern_width:.1f}px, last_offser: {self.last_offset}",
                 (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1,
                 (0, 255, 255), 2, cv2.LINE_AA
             )
@@ -219,9 +237,9 @@ class TailDuckNode(DTROS):
                 rospy.loginfo("Not detected")
 
         # --- 3) Always publish debug image ---
-        if DEBUG_TAIL:
-            imgmsg = self.bridge.cv2_to_compressed_imgmsg(debug)
-            self.pub_circlepattern_image.publish(imgmsg)
+        # if DEBUG_TAIL:
+        imgmsg = self.bridge.cv2_to_compressed_imgmsg(debug)
+        self.pub_circlepattern_image.publish(imgmsg)
 
         return result
 
@@ -285,7 +303,7 @@ class TailDuckNode(DTROS):
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
 
-                offset = -(self.offset + 50) if following_white else self.offset
+                offset = -(self.offset + 90) if following_white else self.offset
                 self.proportional = cx - int(crop.shape[1] / 2) + offset
 
                 # Debug draw
@@ -318,10 +336,20 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
-        # Always stop at red first
+        # Always stop at red if not stopped already
         stopline_detected, distance = self.detect_red_intersection(image_cv)
         if stopline_detected and distance < 30:
             self.stop_at_red()
+        
+        # First red encountered, turn in the direction of leading duckiebot
+        if self.red_stops_count == 1:
+            if self.last_offset < 0:
+                self.nav.turn_left(0.35, 1.5, extra=1)
+            elif self.last_offset > 0:
+                self.nav.move_straight(0.35)
+                self.nav.turn_right(0, -2.2)
+                # self.nav.turn_right(0.2, -2)
+            self.red_stops_count +=1
 
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
@@ -375,6 +403,11 @@ class TailDuckNode(DTROS):
 
             # Limit speed to avoid overshooting
             v = max(min(v, 0.3), 0.05) if v > 0 else 0
+
+            # Preventing collision is highest priority
+            if self.stop_bot:
+                self.nav.publish_velocity(0,0)
+                return
 
             rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
             self.nav.publish_velocity(v, omega)
