@@ -14,7 +14,7 @@ from turbojpeg import TurboJPEG
 import numpy as np
 
 DEBUG_LANE_FOLLOW = False
-DEBUG_TAIL = True
+DEBUG_TAIL = False
 
 class TailDuckNode(DTROS):
     def __init__(self, node_name):
@@ -60,12 +60,17 @@ class TailDuckNode(DTROS):
         self.bridge = CvBridge()
         self.jpeg = TurboJPEG()
         self.sub = rospy.Subscriber("/" + self.veh + "/camera_node/image/compressed",
-                                    CompressedImage,
-                                    self.image_callback,
-                                    queue_size=1,
-                                    buff_size="20MB")
+                        CompressedImage,
+                        self.image_callback,
+                        queue_size=1,
+                        buff_size="20MB")
         self.pub_mask = rospy.Publisher(
-            f"/{self.veh}/combined/mask/compressed", CompressedImage, queue_size=1
+            f"/{self.veh}/combined/mask/compressed", 
+            CompressedImage, queue_size=1
+        )
+        self.pub_blue_debug = rospy.Publisher(
+            f"/{self.veh}/debug/blue_bot_detection/compressed",
+            CompressedImage, queue_size=1
         )
 
         self.pub_circlepattern_image = rospy.Publisher("/{}/duckiebot_detection_node/detection_image/compressed".format(os.environ['VEHICLE_NAME']), CompressedImage, queue_size=1)
@@ -242,6 +247,49 @@ class TailDuckNode(DTROS):
         self.pub_circlepattern_image.publish(imgmsg)
 
         return result
+    
+    def detect_blue_bot(self, image_cv):
+        """
+        Detects the blue trailing bot in the image and returns "left"/"right" 
+        based on its position. Also publishes a debug image with the contour overlaid.
+        """
+        hsv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2HSV)
+        lower_blue = np.array([106, 68, 0])
+        upper_blue = np.array([151, 255, 145])
+        blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+        contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        debug = image_cv.copy()
+
+        direction = None
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest) > 500:
+                x, y, w, h = cv2.boundingRect(largest)
+                blue_center = x + w // 2
+
+                # draw a box around the detected bot
+                cv2.rectangle(debug, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                # draw center line
+                cv2.line(debug,
+                        (blue_center, 0),
+                        (blue_center, debug.shape[0]),
+                        (255, 0, 0), 1)
+
+                if blue_center < debug.shape[1] // 2:
+                    direction = "left"
+                    cv2.putText(debug, "LEFT", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+                else:
+                    direction = "right"
+                    cv2.putText(debug, "RIGHT", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+
+        # publish debug image
+        if DEBUG_TAIL:
+            blue_dbg_msg = self.bridge.cv2_to_compressed_imgmsg(debug)
+            self.pub_blue_debug.publish(blue_dbg_msg)
+
+        return direction
+
 
     def detect_red_intersection(self, image):
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -342,14 +390,16 @@ class TailDuckNode(DTROS):
             self.stop_at_red()
         
         # First red encountered, turn in the direction of leading duckiebot
-        if self.red_stops_count == 1:
-            if self.last_offset < 0:
-                self.nav.turn_left(0.35, 1.5, extra=1)
-            elif self.last_offset > 0:
-                self.nav.move_straight(0.35)
-                self.nav.turn_right(0, -2.2)
-                # self.nav.turn_right(0.2, -2)
-            self.red_stops_count +=1
+            if self.red_stops_count == 1:
+                blue_direction = self.detect_blue_bot(image_cv)
+                if blue_direction == "left":
+                    self.nav.turn_left(0.35, 1.5, extra=1)
+                elif blue_direction == "right":
+                    self.nav.move_straight(0.35)
+                    self.nav.turn_right(0, -2.2)
+                else: return # Don't move until the bot was detected
+                self.red_stops_count += 1
+                return
 
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
