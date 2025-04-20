@@ -3,7 +3,7 @@
 import rospy
 import os
 from duckietown.dtros import DTROS, NodeType
-from sensor_msgs.msg import CompressedImage, Range
+from sensor_msgs.msg import CompressedImage, Range, CameraInfo
 from geometry_msgs.msg import Point32
 import cv2
 from general_navigation import NavigationControl
@@ -28,7 +28,11 @@ class TailDuckNode(DTROS):
         # --- Apriltag detection setup ---
         self.detector = dt_apriltags.Detector(families="tag36h11")
         self.tag_size = 0.065
+        self.camera_parameters = None
         self.last_tag_id = -1
+        camera_info_topic = f"/{self.veh}/camera_node/camera_info"
+        self.camera_info_sub = rospy.Subscriber(camera_info_topic, CameraInfo, self.camera_info_callback,  queue_size=1)
+
         
 
         # --- General collision prevention setup ---
@@ -52,8 +56,8 @@ class TailDuckNode(DTROS):
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 230
-        self.P = 0.025
+        self.offset = 220
+        self.P = 0.022
         self.D = -0.0025
         self.I = 0
         self.last_error = 0
@@ -62,7 +66,7 @@ class TailDuckNode(DTROS):
 
         # ---- Red intersection setup
         self.stopped_at_red = False
-        self.time_of_red_stop = rospy.get_time()
+        self.time_of_red_stop = 0
         self.red_cooldown_duration = 10
         self.red_stops_count = 0
 
@@ -104,12 +108,59 @@ class TailDuckNode(DTROS):
 
         rospy.on_shutdown(self.hook)
 
+    # def init_image_sub(self):
+    #     self.camera_info_sub = rospy.Subscriber(
+    #         self.img_topic,
+    #         CompressedImage,
+    #         self.camera_callback,
+    #         queue_size=1
+    #     )
+
+    def camera_info_callback(self, msg):
+        self.camera_calibration = msg
+
+        # print("== Calibrating Camera ==")
+
+        # currRawImage_height = img.shape[0]
+        # currRawImage_width = img.shape[1]
+        currRawImage_height = 640
+        currRawImage_width = 480
+
+        scale_matrix = np.ones(9)
+        if self.camera_calibration.height != currRawImage_height or self.camera_calibration.width != currRawImage_width:
+            scale_width = float(currRawImage_width) / self.camera_calibration.width
+            scale_height = float(currRawImage_height) / self.camera_calibration.height
+            scale_matrix[0] *= scale_width
+            scale_matrix[2] *= scale_width
+            scale_matrix[4] *= scale_height
+            scale_matrix[5] *= scale_height
+
+        self.tag_size = 0.065 #rospy.get_param("~tag_size", 0.065)
+        rect_K, _ = cv2.getOptimalNewCameraMatrix(
+            (np.array(self.camera_calibration.K)*scale_matrix).reshape((3, 3)),
+            self.camera_calibration.D,
+            (640,480),
+            1.0
+        )
+        self.camera_parameters = (rect_K[0, 0], rect_K[1, 1], rect_K[0, 2], rect_K[1, 2])
+
+
+        try:
+            self.subscriberCameraInfo.shutdown()
+            self.safeToRunProgram = True
+            # print("== Camera Info Subscriber successfully killed ==")
+        except BaseException:
+            pass
+
+
     def detect_apriltag(self, image_cv):
         """
         Detects apriltags in the image and returns the tag ID and its position.
         """
+        if self.camera_parameters is None:
+            return None
         gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-        tags = self.detector.detect(gray, estimate_tag_pose=True, camera_params=(self.camera_matrix, self.camera_distortion), tag_size=self.tag_size)
+        tags = self.detector.detect(gray)
 
         closest = 0
         if tags:
@@ -402,6 +453,7 @@ class TailDuckNode(DTROS):
 
         if self.count<1:
             self.set_led_color(self.light_color_list)
+            # self.init_image_sub()
             self.count = 1
 
         if now - self.last_stamp < self.publish_duration:
@@ -409,7 +461,8 @@ class TailDuckNode(DTROS):
         self.last_stamp = now
 
         # Detect the apriltag in the image
-        tag_id = self.detect_apriltag(image_cv)
+        tag_id = None
+        # tag_id = self.detect_apriltag(image_cv)
         
         # Always stop at red if not stopped already
         stopline_detected, distance = self.detect_red_intersection(image_cv)
@@ -419,17 +472,18 @@ class TailDuckNode(DTROS):
             if blue_direction is not None:
                 self.blue_direction = blue_direction
 
-        if stopline_detected and distance < 30 and (rospy.get_time() - self.time_of_red_stop) > self.red_cooldown_duration:
-            self.stopped_at_red = False
+        if stopline_detected and distance < 20 and (rospy.get_time() - self.time_of_red_stop) > self.red_cooldown_duration:
             self.stop_at_red()
-        
+            self.stopped_at_red = False
+            rospy.loginfo(self.time_of_red_stop)
+
             if self.red_stops_count == 0:
                 if self.blue_direction == "left":
-                    self.nav.turn_left(0.4, 1.5, extra=1.0)
+                    self.nav.turn_left(0.4, 2.0, extra=0.9)
                     rospy.loginfo("Left turn")
                 elif self.blue_direction == "right":
                     self.nav.move_straight(0.35)
-                    self.nav.turn_right(0, -2.5)
+                    self.nav.turn_right(0, -2.5, extra=0.5)
                     rospy.loginfo("Right turn")
                 self.red_stops_count += 1
 
@@ -437,16 +491,18 @@ class TailDuckNode(DTROS):
                 self.nav.move_straight(0.5)
                 rospy.loginfo("Straight")
                 self.red_stops_count += 1
+                self.red_cooldown_duration = 15 # JUst so it doesn't detect red while going straight
 
             elif self.red_stops_count == 2:
                 if self.blue_direction == "left":
-                    self.nav.turn_left(0.4, 1.5, extra=1.0)
+                    self.nav.turn_left(0.4, 2.0, extra=0.9)
                     rospy.loginfo("Left turn")
                 elif self.blue_direction == "right":
                     self.nav.move_straight(0.35)
                     self.nav.turn_right(0, -2.5)
                     rospy.loginfo("Right turn")
                 self.red_stops_count += 1
+                self.red_cooldown_duration = 10
 
             elif self.red_stops_count == 3:
                 # logic if a tag was seen
