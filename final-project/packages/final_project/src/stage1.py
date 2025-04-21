@@ -60,6 +60,8 @@ class TailDuckNode(DTROS):
         self.drive_dist = 0
         self.stop_time = 0
         self.maneuvering = False
+        self.f_y = None
+        self.f_c = None
         self.maneuver_state = 0
         self.state_time = 0
         self.detection_stage = 0
@@ -162,6 +164,11 @@ class TailDuckNode(DTROS):
             # print("== Camera Info Subscriber successfully killed ==")
         except BaseException:
             pass
+        
+        # paramenters for estimating the ground distance for detecting objects
+        self.f_y = rect_K[1, 1]
+        self.c_y = rect_K[1, 2]
+
 
 
     def detect_apriltag(self, image_cv):
@@ -521,23 +528,36 @@ class TailDuckNode(DTROS):
 
     def detect_broken_bot(self, image_cv):
         """
-        Detects the broken bot in the image and returns triggers maneuver
+        Detects the broken bot in the image and returns if the bot was detected (bool), which triggers maneuver, and the estimated (ground) distance in cm to the bot
         Also publishes a debug image with the contour overlaid.
         """
-        hsv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2HSV)
+        # Crop top part of the image to reduce false positives
+        crop_offset = 100 
+        cropped_img = image_cv[crop_offset:, :]
+
+        # Convert to HSV and mask for blue
+        hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
         lower_blue = np.array([106, 68, 0])
         upper_blue = np.array([151, 255, 145])
         blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
         contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        debug = image_cv.copy()
+        debug = cropped_img.copy()
 
         broken_bot_detected = False
+        dist_cm = float('inf')
+        
         if contours:
             largest = max(contours, key=cv2.contourArea)
             if cv2.contourArea(largest) > 500:
                 x, y, w, h = cv2.boundingRect(largest)
                 blue_center = x + w // 2
+                y_bot = y + h
+                y_img = y_bot + crop_offset
+
+                if self.f_y is not None and self.c_y is not None:
+                cam_height_cm = 23
+                dist_cm = (cam_height_cm * self.f_y) / (y_img - self.c_y)
 
                 # draw a box around the detected bot
                 cv2.rectangle(debug, (x, y), (x+w, y+h), (255, 0, 0), 2)
@@ -546,6 +566,12 @@ class TailDuckNode(DTROS):
                         (blue_center, 0),
                         (blue_center, debug.shape[0]),
                         (255, 0, 0), 1)
+                # annotate distance
+                cv2.putText(debug, f"{dist_cm:.1f}cm",
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255), 1)
                 
                 broken_bot_detected = True
 
@@ -554,7 +580,7 @@ class TailDuckNode(DTROS):
         blue_dbg_msg = self.bridge.cv2_to_compressed_imgmsg(debug)
         self.pub_blue_debug.publish(blue_dbg_msg)
 
-        return broken_bot_detected
+        return broken_bot_detected, dist_cm
 
     def maneuver_around_bot(self):
         """
@@ -563,7 +589,7 @@ class TailDuckNode(DTROS):
         self.state_time += 1
         turn_angle = 2.5 #rad/sec
         turn_time = 10 #~1second
-        straight_time = 20 #~5seconds
+        straight_time = 18 #~5seconds
         if self.state_time < 5:
             return 0, 0
         if self.maneuver_state == 0:
@@ -580,7 +606,7 @@ class TailDuckNode(DTROS):
             # return -0.25, turn_angle
             return 0, turn_angle
         elif self.maneuver_state == 2:
-            # Drive forward inot the new lane
+            # Drive forward into the new lane
             if self.state_time > straight_time - 15:
                 self.maneuver_state += 1
                 self.state_time = 0
@@ -638,9 +664,8 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
-        broken_bot = self.detect_broken_bot(image_cv)
-
         # ------------------- Manuever broken bot logic -----------------------
+        broken_bot, dist = self.detect_broken_bot(image_cv)
         # if self.red_stops_count => 5:
         if self.stop_bot or self.maneuvering:
             if self.maneuvering:
@@ -649,9 +674,9 @@ class TailDuckNode(DTROS):
                 return
             elif self.detection_stage == 1: 
                 rospy.loginfo("Checking for broken bot...")
-                if broken_bot:
+                if broken_bot and dist < 30:
+                    rospy.loginfo(f"Broken bot detected at {dist:.1f}cm — initiating maneuver")
                     self.maneuvering = True
-                    rospy.loginfo("Broken bot detected, manuevering...")
                     vel, omega = self.maneuver_around_bot()
                     self.nav.publish_velocity(vel, omega)
                     return
