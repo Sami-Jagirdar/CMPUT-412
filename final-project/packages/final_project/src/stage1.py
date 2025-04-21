@@ -15,7 +15,7 @@ import numpy as np
 
 import dt_apriltags
 
-DEBUG_LANE_FOLLOW = False
+DEBUG_LANE_FOLLOW = True
 DEBUG_TAIL = False
 
 class TailDuckNode(DTROS):
@@ -57,8 +57,8 @@ class TailDuckNode(DTROS):
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 220
-        self.P = 0.025
+        self.offset = 230
+        self.P = 0.022
         self.D = -0.0025
         self.I = 0
         self.last_error = 0
@@ -103,7 +103,7 @@ class TailDuckNode(DTROS):
         self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=1)
 
         self.nav = NavigationControl()
-        self.velocity = 0.25
+        self.velocity = 0.3
         self.omega = 0
         self.nav.publish_velocity(0, self.omega)
 
@@ -412,7 +412,7 @@ class TailDuckNode(DTROS):
     
     def lane_detect(self, image_cv):
         # Crops and finds the lane; sets self.proportional
-        crop = image_cv[300:, :, :]
+        crop = image_cv[320:, :, :]
         crop_hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
         def find_largest(mask):
@@ -434,8 +434,10 @@ class TailDuckNode(DTROS):
 
         # Fallback: white lane
         if idx == -1:
-            white_lower = np.array([120, 18, 155], np.uint8)
-            white_upper = np.array([128, 39, 255], np.uint8)
+            # white_lower = np.array([120, 18, 155], np.uint8)
+            # white_upper = np.array([128, 39, 255], np.uint8)
+            white_lower = np.array([0, 0, 180], np.uint8)
+            white_upper = np.array([180, 60, 255], np.uint8)
             white_mask = cv2.inRange(crop_hsv, white_lower, white_upper)
             contours, idx = find_largest(white_mask)
             mask_used = white_mask
@@ -448,7 +450,7 @@ class TailDuckNode(DTROS):
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
 
-                offset = -(self.offset + 90) if following_white else self.offset
+                offset = -(self.offset + 50) if following_white else self.offset
                 self.proportional = cx - int(crop.shape[1] / 2) + offset
 
                 # Debug draw
@@ -456,6 +458,7 @@ class TailDuckNode(DTROS):
                     color = (255, 0, 0) if following_white else (0, 255, 0)
                     cv2.drawContours(crop, contours, idx, color, 3)
                     cv2.circle(crop, (cx, cy), 7, (0, 0, 255), -1)
+                    cv2.putText(crop, str(self.proportional), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             else:
                 self.proportional = None
         else:
@@ -469,6 +472,83 @@ class TailDuckNode(DTROS):
             )
             self.pub_mask.publish(msg_out)
 
+    def lane_detect_center(self, image_cv):
+        crop = image_cv[300:, :, :]
+        crop_hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        crop_width = crop.shape[1]
+        mid_x = crop_width // 2
+
+        def find_centroid(mask, side=None):
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            largest = None
+            max_area = 20
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area > max_area:
+                    cx = int(cv2.moments(c)['m10'] / (cv2.moments(c)['m00'] + 1e-5))
+                    if side == "left" and cx > mid_x:
+                        continue
+                    if side == "right" and cx < mid_x:
+                        continue
+                    largest = c
+                    max_area = area
+            if largest is not None:
+                M = cv2.moments(largest)
+                if M['m00'] > 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                    return (cx, cy), largest
+            return None, None
+
+        # Detect yellow (expect on left) and white (expect on right)
+        yellow_mask = cv2.inRange(crop_hsv, self.ROAD_MASK[0], self.ROAD_MASK[1])
+        white_lower = np.array([120, 18, 155], np.uint8)
+        white_upper = np.array([128, 39, 255], np.uint8)
+        white_mask = cv2.inRange(crop_hsv, white_lower, white_upper)
+
+        yellow_center, yellow_contour = find_centroid(yellow_mask, side="left")
+        white_center, white_contour = find_centroid(white_mask, side="right")
+
+        # CASE 1: Both detected — center between them
+        if yellow_center and white_center:
+            lane_center_x = (yellow_center[0] + white_center[0]) // 2
+            self.proportional = lane_center_x - mid_x
+
+            if DEBUG_LANE_FOLLOW:
+                cv2.drawContours(crop, [yellow_contour], -1, (0, 255, 255), 2)
+                cv2.drawContours(crop, [white_contour], -1, (255, 255, 255), 2)
+                cv2.circle(crop, (lane_center_x, yellow_center[1]), 5, (0, 0, 255), -1)
+
+        # CASE 2: Only yellow on the left
+        elif yellow_center:
+            self.proportional = yellow_center[0] - mid_x + self.offset
+
+            if DEBUG_LANE_FOLLOW:
+                cv2.drawContours(crop, [yellow_contour], -1, (0, 255, 255), 2)
+                cv2.circle(crop, yellow_center, 5, (0, 0, 255), -1)
+
+        # CASE 3: Only white on the right
+        elif white_center:
+            self.proportional = white_center[0] - mid_x - self.offset - 50
+
+            if DEBUG_LANE_FOLLOW:
+                cv2.drawContours(crop, [white_contour], -1, (255, 255, 255), 2)
+                cv2.circle(crop, white_center, 5, (0, 0, 255), -1)
+
+        # CASE 4: Nothing usable
+        else:
+            self.proportional = None
+
+        # Debug mask publish
+        if DEBUG_LANE_FOLLOW:
+            combined_mask = cv2.bitwise_or(yellow_mask, white_mask)
+            debug_img = cv2.bitwise_and(crop, crop, mask=combined_mask)
+            msg_out = CompressedImage(
+                format="jpeg", data=self.jpeg.encode(debug_img)
+            )
+            self.pub_mask.publish(msg_out)
+
+    
     def image_callback(self, msg):
         image_cv = self.bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
         now = rospy.Time.now()
@@ -483,16 +563,17 @@ class TailDuckNode(DTROS):
         self.last_stamp = now
 
         # Detect the apriltag in the image
-        # tag_id = None
         tag_id = self.detect_apriltag(image_cv)
+        if tag_id is not None:
+            self.last_tag_id = tag_id
         
         # Always stop at red if not stopped already
-        stopline_detected, distance = self.detect_red_intersection(image_cv)
+        # stopline_detected, distance = self.detect_red_intersection(image_cv)
 
-        if stopline_detected and distance < 50:
-            blue_direction = self.detect_blue_bot(image_cv)
-            if blue_direction is not None:
-                self.blue_direction = blue_direction
+        # if stopline_detected and distance < 50:
+        #     blue_direction = self.detect_blue_bot(image_cv)
+        #     if blue_direction is not None:
+        #         self.blue_direction = blue_direction
 
         # if stopline_detected and distance < 20 and (rospy.get_time() - self.time_of_red_stop) > self.red_cooldown_duration:
         #     self.stop_at_red()
@@ -515,52 +596,54 @@ class TailDuckNode(DTROS):
         #         self.red_stops_count += 1
         #         self.red_cooldown_duration = 15 # JUst so it doesn't detect red while going straight
 
-            # elif self.red_stops_count == 2:
-            #     if self.blue_direction == "left":
-            #         self.nav.turn_left(0.35, 2.0, extra=0.8)
-            #         rospy.loginfo("Left turn")
-            #     elif self.blue_direction == "right":
-            #         self.nav.move_straight(0.35)
-            #         self.nav.turn_right(0, -2.5)
-            #         rospy.loginfo("Right turn")
-            #     self.red_stops_count += 1
-            #     self.red_cooldown_duration = 10
+        #     elif self.red_stops_count == 2:
+        #         if self.blue_direction == "left":
+        #             self.nav.turn_left(0.35, 2.0, extra=0.8)
+        #             rospy.loginfo("Left turn")
+        #         elif self.blue_direction == "right":
+        #             self.nav.move_straight(0.35)
+        #             self.nav.turn_right(0, -2.5, extra=0.5)
+        #             rospy.loginfo("Right turn")
+        #         self.red_stops_count += 1
+        #         self.red_cooldown_duration = 10
 
-            # elif self.red_stops_count == 3:
-            #     # logic if a tag was seen
-            #     if tag_id is not None:
-            #         if tag_id == 48:
-            #             rospy.loginfo("Turning LEFT at AprilTag 21")
-            #             self.nav.turn_left()
-            #         elif tag_id == 50:
-            #             rospy.loginfo("Turning RIGHT at AprilTag 59")
-            #             self.nav.turn_right()
-            #         else:
-            #             rospy.logwarn(f"Unknown tag ID: {tag_id}")
-            #     else:
-            #         rospy.loginfo("No tag seen. Proceeding forward.")
-            #     self.red_stops_count += 1
+        #     elif self.red_stops_count == 3:
+        #         # logic if a tag was seen
+        #         if tag_id is not None:
+        #             if tag_id == 48:
+        #                 rospy.loginfo("Turning LEFT at AprilTag 48")
+        #                 self.nav.turn_left(0.4, 2.0, extra=0.9)
+        #             elif tag_id == 50:
+        #                 rospy.loginfo("Turning RIGHT at AprilTag 50")
+        #                 self.nav.move_straight(0.35)
+        #                 self.nav.turn_right(0, -2.5, extra=0.5)
+        #             else:
+        #                 rospy.logwarn(f"Unknown tag ID: {tag_id}")
+        #         else:
+        #             rospy.loginfo("No tag seen. Proceeding forward.")
+        #         self.red_stops_count += 1
 
-            # elif self.red_stops_count == 4:
-            #     # logic if a tag was seen
-            #     if tag_id is not None:
-            #         if tag_id == 48:
-            #             rospy.loginfo("Turning LEFT at AprilTag 21")
-            #             self.nav.turn_left()
-            #         elif tag_id == 50:
-            #             rospy.loginfo("Turning RIGHT at AprilTag 59")
-            #             self.nav.turn_right()
-            #         else:
-            #             rospy.logwarn(f"Unknown tag ID: {tag_id}")
-            #     else:
-            #         rospy.loginfo("No tag seen. Proceeding forward.")
-            #     self.red_stops_count += 1
+        #     if self.red_stops_count == 4:
+        #         # logic if a tag was seen
+        #         if self.last_tag_id is not None:
+        #             if self.last_tag_id == 48:
+        #                 rospy.loginfo("Turning LEFT at AprilTag 48")
+        #                 self.nav.turn_left(0.4, 2.0, extra=0.9)
+        #             elif self.last_tag_id == 50:
+        #                 rospy.loginfo("Turning RIGHT at AprilTag 50")
+        #                 self.nav.move_straight(0.35)
+        #                 self.nav.turn_right(0, -2.5, extra=0.5)
+        #             else:
+        #                 rospy.logwarn(f"Unknown tag ID: {self.last_tag_id}")
+        #         else:
+        #             rospy.loginfo("No tag seen. Proceeding forward.")
+        #         self.red_stops_count += 1
 
-            # elif self.red_stops_count == 5:
-            #     # TODO: Stage 4 Parking
-            #     pass
+        #     elif self.red_stops_count == 5:
+        #         # TODO: Stage 4 Parking
+        #         pass
 
-            # rospy.loginfo(self.red_stops_count)
+        #     rospy.loginfo(self.red_stops_count)
 
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
@@ -590,39 +673,40 @@ class TailDuckNode(DTROS):
 
                 self.last_error = self.proportional
                 self.last_time = current_time
-            # rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
+            rospy.loginfo(f"[Lane Following] v={self.velocity:.2f}, omega={self.omega:.2f}")
             self.nav.publish_velocity(self.velocity, self.omega)
 
-        # tail = self.detect_bot(image_cv)
-        # if tail is not None:
-        #     # self.set_led_color([
-        #     #                     [0, 0, 0, 0],
-        #     #                     [0, 0, 1, 0],
-        #     #                     [0, 0, 0, 0],
-        #     #                     [0, 0, 1, 1],
-        #     #                     [0, 0, 0, 1],
-        #     #                      ])
-        #     error_distance, offset = tail
+        tail = self.detect_bot(image_cv)
+        if tail is not None:
+            # self.set_led_color([
+            #                     [0, 0, 0, 0],
+            #                     [0, 0, 1, 0],
+            #                     [0, 0, 0, 0],
+            #                     [0, 0, 1, 1],
+            #                     [0, 0, 0, 1],
+            #                      ])
+            error_distance, offset = tail
 
-        #     # Tuning parameters
-        #     Kp_dist = 0.013
-        #     Kp_angle = -0.005
+            # Tuning parameters
+            Kp_dist = 0.013
+            Kp_angle = -0.005
 
-        #     # Compute velocity and omega based on error
-        #     v = Kp_dist * error_distance
-        #     omega = Kp_angle * offset
+            # Compute velocity and omega based on error
+            v = Kp_dist * error_distance
+            omega = Kp_angle * offset
 
-        #     # Limit speed to avoid overshooting
-        #     v = max(min(v, 0.3), 0.05) if v > 0 else 0
+            # Limit speed to avoid overshooting
+            v = max(min(v, 0.3), 0.05) if v > 0 else 0
 
-        #     # Preventing collision is highest priority
-        #     if self.stop_bot:
-        #         self.nav.publish_velocity(0,0)
-        #         return
+            # Preventing collision is highest priority
+            if self.stop_bot:
+                self.nav.publish_velocity(0,0)
+                rospy.loginfo("Stopping cuz of tof")
+                return
 
-        #     # rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
-        #     self.nav.publish_velocity(v, omega)
-        #     return
+            rospy.loginfo(f"[Tailing] error={error_distance:.1f}, offset={offset:.1f} => v={v:.2f}, omega={omega:.2f}")
+            self.nav.publish_velocity(v, omega)
+            return
 
     def hook(self):
         print("SHUTTING DOWN")
