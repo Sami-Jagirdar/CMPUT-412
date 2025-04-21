@@ -62,14 +62,15 @@ class TailDuckNode(DTROS):
         self.maneuvering = False
         self.maneuver_state = 0
         self.state_time = 0
+        self.detection_stage = 0
         
 
         # --- Lane following setup ---
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
-        self.offset = 220
+        self.offset = 200
         self.P = 0.025
-        self.D = -0.0025
-        self.I = 0
+        self.D = -0.0024
+        self.I = 0.000
         self.last_error = 0
         self.integral = 0
         self.last_time = rospy.get_time()
@@ -112,7 +113,7 @@ class TailDuckNode(DTROS):
         self.pub_leds = rospy.Publisher(f"/{self.veh}/led_emitter_node/led_pattern", LEDPattern, queue_size=1)
 
         self.nav = NavigationControl()
-        self.velocity = 0.25
+        self.velocity = 0.3
         self.omega = 0
         self.nav.publish_velocity(0, self.omega)
 
@@ -443,8 +444,8 @@ class TailDuckNode(DTROS):
 
         # Fallback: white lane
         if idx == -1:
-            white_lower = np.array([120, 18, 155], np.uint8)
-            white_upper = np.array([128, 39, 255], np.uint8)
+            white_lower = np.array([0, 0, 180], np.uint8)
+            white_upper = np.array([180, 60, 255], np.uint8)
             white_mask = cv2.inRange(crop_hsv, white_lower, white_upper)
             contours, idx = find_largest(white_mask)
             mask_used = white_mask
@@ -560,14 +561,14 @@ class TailDuckNode(DTROS):
         Maneuvers around (to the left) the broken bot in the image
         """
         self.state_time += 1
-        turn_angle = 10
-        turn_time = 12
-        straight_time = 50
+        turn_angle = 2.5 #rad/sec
+        turn_time = 10 #~1second
+        straight_time = 20 #~5seconds
         if self.state_time < 5:
             return 0, 0
         if self.maneuver_state == 0:
             # Wait before turning
-            if self.state_time > 25:
+            if self.state_time > 10:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0, 0
@@ -576,10 +577,11 @@ class TailDuckNode(DTROS):
             if self.state_time > turn_time:
                 self.maneuver_state += 1
                 self.state_time = 0
-            return -0.25, turn_angle
+            # return -0.25, turn_angle
+            return 0, turn_angle
         elif self.maneuver_state == 2:
             # Drive forward inot the new lane
-            if self.state_time > straight_time:
+            if self.state_time > straight_time - 15:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
@@ -588,10 +590,11 @@ class TailDuckNode(DTROS):
             if self.state_time > turn_time:
                 self.maneuver_state += 1
                 self.state_time = 0
-            return 0.25, -turn_angle
+            # return 0.25, -turn_angle
+            return 0, -turn_angle
         elif self.maneuver_state == 4:
             # Continue driving to pass the broken bot
-            if self.state_time > straight_time:
+            if self.state_time > straight_time-8:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
@@ -600,21 +603,22 @@ class TailDuckNode(DTROS):
             if self.state_time > turn_time:
                 self.maneuver_state += 1
                 self.state_time = 0
-            return 0.25, -turn_angle
+            return 0, -turn_angle
         elif self.maneuver_state == 6:
             # Move straight back towards center
-            if self.state_time > straight_time:
+            if self.state_time > straight_time-15:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
         elif self.maneuver_state == 7:
-            # Final alignement with oriinal direction
+            # Final alignement with original direction
             if self.state_time > turn_time:
                 self.maneuver_state += 1
                 self.state_time = 0
-            return 0.25, turn_angle
+            return 0, turn_angle
         else:
             # Maneuver complete
+            self.detection_stage = 2
             self.maneuvering = False
             self.state_time = 0
             self.maneuver_state = 0
@@ -634,6 +638,8 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
+        broken_bot = self.detect_broken_bot(image_cv)
+
         # ------------------- Manuever broken bot logic -----------------------
         # if self.red_stops_count => 5:
         if self.stop_bot or self.maneuvering:
@@ -641,18 +647,17 @@ class TailDuckNode(DTROS):
                 vel, omega = self.maneuver_around_bot()
                 self.nav.publish_velocity(vel, omega)
                 return
-            else:
+            elif self.detection_stage == 1: 
                 rospy.loginfo("Checking for broken bot...")
-                broken_bot = self.detect_broken_bot(image_cv)
                 if broken_bot:
                     self.maneuvering = True
                     rospy.loginfo("Broken bot detected, manuevering...")
                     vel, omega = self.maneuver_around_bot()
                     self.nav.publish_velocity(vel, omega)
                     return
-                else: # Only stop, no maneuver and no detect broken bot
-                    self.nav.publish_velocity(0,0)
-                    return
+            else: # Only stop, no maneuver and no detect broken bot
+                self.nav.publish_velocity(0,0)
+                return
         #else:
             # if self.stop_bot:
             #     self.nav.publish_velocity(0,0)
@@ -740,30 +745,32 @@ class TailDuckNode(DTROS):
         
         # ------------------- Crosswalk logic ----------------------------------
         # if self.red_stops_count => 5:
-        if self.detect_crosswalks or self.stop_time < 10:
-            stopwalk_detection, _ = self.detect_line(image_cv)
-            if stopwalk_detection:
-                rospy.loginfo("Crosswalk detected - stopping...")
-                self.detect_crosswalks = False
-                vel = 0
-                self.nav.publish_velocity(vel, 0)
-                self.stop_time += 1
-                return
-        else:
-            if self.detect_ducks(image_cv):
-                rospy.loginfo("Ducks detected - waiting...")
-                vel = 0
-                self.nav.publish_velocity(vel, 0)
-                return
-            elif self.drive_dist < 50:
-                rospy.loginfo("Driving through crosswalk")
-                # vel = 0.5
-                self.drive_dist += 1
+        if self.detection_stage in [0, 2]: 
+            if self.detect_crosswalks or self.stop_time < 10:
+                stopwalk_detection, _ = self.detect_line(image_cv)
+                if stopwalk_detection:
+                    rospy.loginfo("Crosswalk detected - stopping...")
+                    self.detect_crosswalks = False
+                    vel = 0
+                    self.nav.publish_velocity(vel, 0)
+                    self.stop_time += 1
+                    return
             else:
-                rospy.loginfo("Crosswalk complete - resuming lane following...")
-                self.detect_crosswalks = True
-                self.drive_dist = 0
-                self.stop_time = 0
+                if self.detect_ducks(image_cv):
+                    rospy.loginfo("Ducks detected - waiting...")
+                    vel = 0
+                    self.nav.publish_velocity(vel, 0)
+                    return
+                # elif self.drive_dist < 10:
+                #     rospy.loginfo("Driving through crosswalk")
+                #     # vel = 0.5
+                #     self.drive_dist += 1
+                else:
+                    rospy.loginfo("Crosswalk complete - resuming lane following...")
+                    self.detection_stage += 1
+                    self.detect_crosswalks = True
+                    self.drive_dist = 0
+                    self.stop_time = 0
             
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
