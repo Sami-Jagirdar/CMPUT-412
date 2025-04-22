@@ -1141,7 +1141,7 @@ class TailDuckNode(DTROS):
                 self.red_stops_count += 1
                 # self.red_cooldown_duration = 10
 
-            elif self.red_stops_count >= 3:
+            elif self.red_stops_count >= 3 and self.detection_stage < 1:
                 # logic if a tag was seen
                 if tag_id is not None:
                     if tag_id == 48:
