@@ -60,7 +60,7 @@ class TailDuckNode(DTROS):
         self.ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
         self.offset = 230
         self.P = 0.033
-        self.D = -0.0033
+        self.D = -0.0035
         self.I = 0
         self.last_error = 0
         self.integral = 0
@@ -105,9 +105,9 @@ class TailDuckNode(DTROS):
         }
         self.expected_tag_id = self.parking_tag_map[parking_id]
         # — continuous control gains & thresholds —
-        self.search_omega      = -2.5   # spin speed while searching
+        self.search_omega      = -2.0   # spin speed while searching
         self.Kp_angle          = 0.01   # ω = Kp_angle * err_x
-        self.max_omega         = 1.5
+        self.max_omega         = 1.3
 
         self.Kp_forward        = 0.008   # v = Kp_forward * err_size
         self.max_forward       = 0.17
@@ -708,24 +708,24 @@ class TailDuckNode(DTROS):
             return 0, 0
         elif self.maneuver_state == 1:
             # First turn (left) to shift into next lane
-            if self.state_time > turn_time:
+            if self.state_time > turn_time - 4:
                 self.maneuver_state += 1
                 self.state_time = 0
             # return -0.25, turn_angle
-            return 0, turn_angle
+            return 0, turn_angle-1
         elif self.maneuver_state == 2:
             # Drive forward into the new lane
-            if self.state_time > straight_time - 3:
+            if self.state_time > straight_time - 8:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
         elif self.maneuver_state == 3:
             # Turn back into original direction
-            if self.state_time > turn_time:
+            if self.state_time > turn_time + 4:
                 self.maneuver_state += 1
                 self.state_time = 0
             # return 0.25, -turn_angle
-            return 0, -turn_angle
+            return 0, -turn_angle-1
         elif self.maneuver_state == 4:
             # Continue driving to pass the broken bot
             if self.state_time > straight_time + 5:
@@ -737,7 +737,7 @@ class TailDuckNode(DTROS):
             if self.state_time > turn_time:
                 self.maneuver_state += 1
                 self.state_time = 0
-            return 0, -turn_angle+1.0
+            return 0, -turn_angle
         # elif self.maneuver_state == 6:
         #     # Move straight back towards center
         #     if self.state_time > straight_time-15:
@@ -884,7 +884,7 @@ class TailDuckNode(DTROS):
             v = 0.0
 
         # 7) Check for completion
-        if abs(err_x) <= self.YAW_TOL_PX and abs(err_size) <= self.SIZE_TOL_PX:
+        if abs(err_x) <= self.YAW_TOL_PX+5 and abs(err_size) <= self.SIZE_TOL_PX:
             self.parking_aligned = True
             v = 0.0
             ω = 0.0
@@ -1107,6 +1107,7 @@ class TailDuckNode(DTROS):
         if stopline_detected and distance < stop_d and (rospy.get_time() - self.time_of_red_stop) > self.red_cooldown_duration:
             self.stop_at_red()
             self.stopped_at_red = False
+            self.parking = False
             rospy.loginfo(self.time_of_red_stop)
 
             if self.red_stops_count == 0:
@@ -1195,6 +1196,7 @@ class TailDuckNode(DTROS):
                     elif self.expected_tag_id == 13:
                         self.nav.move_straight(0.15)
                         self.nav.turn_left(0, 3.0, extra=0.5)
+                        self.nav.move_straight(0.2)
                         self.search_omega = -self.search_omega
                     elif self.expected_tag_id == 44:
                         self.nav.turn_right(0.2, -2.5, extra=0.7)
@@ -1204,7 +1206,7 @@ class TailDuckNode(DTROS):
 
             rospy.loginfo(self.red_stops_count)
         
-        if self.red_stops_count == 5:
+        if self.red_stops_count >= 5:
             if self.parking:
                 if self.parking_aligned:
                     rospy.signal_shutdown("Finished parking")
