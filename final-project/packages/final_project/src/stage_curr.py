@@ -1089,6 +1089,7 @@ class TailDuckNode(DTROS):
         tag_id, tags = self.detect_apriltag(image_cv)
         if tag_id is not None:
             self.last_tag_id = tag_id
+        # rospy.loginfo(self.last_tag_id)
         
         # Always stop at red if not stopped already
         stopline_detected, distance = self.detect_red_intersection(image_cv)
@@ -1143,16 +1144,16 @@ class TailDuckNode(DTROS):
 
             elif self.red_stops_count >= 3 and self.detection_stage < 1:
                 # logic if a tag was seen
-                if tag_id is not None:
-                    if tag_id == 48:
+                if self.last_tag_id is not None:
+                    if self.last_tag_id == 48:
                         rospy.loginfo("Turning LEFT at AprilTag 48")
                         self.nav.turn_left(0.4, 2.0, extra=0.9)
-                    elif tag_id == 50:
+                    elif self.last_tag_id == 50:
                         rospy.loginfo("Turning RIGHT at AprilTag 50")
                         self.nav.move_straight(0.4)
                         self.nav.turn_right(0, -2.2, extra=0.5)
                     else:
-                        rospy.logwarn(f"Unknown tag ID: {tag_id}")
+                        rospy.logwarn(f"Unknown tag ID: {self.last_tag_id}")
                 else:
                     rospy.loginfo("No tag seen. Proceeding forward.")
                 self.red_stops_count += 1
