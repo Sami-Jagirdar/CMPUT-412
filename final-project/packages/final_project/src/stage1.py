@@ -37,7 +37,7 @@ class TailDuckNode(DTROS):
         
 
         # --- General collision prevention setup ---
-        self.stop_bot = True
+        self.stop_bot = False
         self.tof_sub = rospy.Subscriber("/" + self.veh + "/front_center_tof_driver_node/range",
                                             Range,
                                             self.cbTOF,
@@ -65,6 +65,9 @@ class TailDuckNode(DTROS):
         self.maneuver_state = 0
         self.state_time = 0
         self.detection_stage = 0
+        self.stopped_at_crosswalk = False
+        self.time_of_blue_stop = 0
+        self.blue_cooldown_duration = 10
         
 
         # --- Lane following setup ---
@@ -486,12 +489,13 @@ class TailDuckNode(DTROS):
             )
             self.pub_mask.publish(msg_out)
 
-###################################################################################################################    
-    # Stage 3 stuff
-    def detect_line(self, image):
+    def detect_crosswalk(self, image):
         """
         Detects the crosswalks
         """
+        # self.time_of_blue_stop = rospy.get_time()
+        # self.stopped_at_crosswalk = True
+
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         red_ranges = {'lower': np.array([100, 150, 50]), 'upper': np.array([140, 255, 255])}
         
@@ -532,7 +536,7 @@ class TailDuckNode(DTROS):
         Also publishes a debug image with the contour overlaid.
         """
         # Crop top part of the image to reduce false positives
-        crop_offset = 100 
+        crop_offset = 320 
         cropped_img = image_cv[crop_offset:, :]
 
         # Convert to HSV and mask for blue
@@ -545,19 +549,33 @@ class TailDuckNode(DTROS):
         debug = cropped_img.copy()
 
         broken_bot_detected = False
-        dist_cm = float('inf')
+        # dist_cm = float('inf')
         
         if contours:
             largest = max(contours, key=cv2.contourArea)
             if cv2.contourArea(largest) > 500:
                 x, y, w, h = cv2.boundingRect(largest)
                 blue_center = x + w // 2
-                y_bot = y + h
-                y_img = y_bot + crop_offset
 
-                if self.f_y is not None and self.c_y is not None:
-                cam_height_cm = 23
-                dist_cm = (cam_height_cm * self.f_y) / (y_img - self.c_y)
+                # # -- to distinguish between crosswalk and bot
+                # aspect_ratio = w / h
+                # image_height = cropped_img.shape[0]
+                # # Filter: shape and position
+                # if aspect_ratio > 2.0:
+                #     rospy.loginfo("[BrokenBot] Skipped — likely crosswalk due to aspect ratio")
+                #     return False, float('inf')
+
+                # if y + h > image_height - 40:
+                #     rospy.loginfo("[BrokenBot] Skipped — detection too low, likely crosswalk")
+                #     return False, float('inf')
+                # # --
+
+                # y_bot = y + h
+                # y_img = y_bot + crop_offset
+
+                # if self.f_y is not None and self.c_y is not None:
+                #     cam_height_cm = 10
+                #     dist_cm = (cam_height_cm * self.f_y) / (y_img - self.c_y)
 
                 # draw a box around the detected bot
                 cv2.rectangle(debug, (x, y), (x+w, y+h), (255, 0, 0), 2)
@@ -566,12 +584,12 @@ class TailDuckNode(DTROS):
                         (blue_center, 0),
                         (blue_center, debug.shape[0]),
                         (255, 0, 0), 1)
-                # annotate distance
-                cv2.putText(debug, f"{dist_cm:.1f}cm",
-                        (x, y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255), 1)
+                # # annotate distance
+                # cv2.putText(debug, f"{dist_cm:.1f}cm",
+                #         (x, y - 10),
+                #         cv2.FONT_HERSHEY_SIMPLEX,
+                #         0.5,
+                #         (255, 255, 255), 1)
                 
                 broken_bot_detected = True
 
@@ -580,16 +598,16 @@ class TailDuckNode(DTROS):
         blue_dbg_msg = self.bridge.cv2_to_compressed_imgmsg(debug)
         self.pub_blue_debug.publish(blue_dbg_msg)
 
-        return broken_bot_detected, dist_cm
+        return broken_bot_detected #, dist_cm
 
     def maneuver_around_bot(self):
         """
         Maneuvers around (to the left) the broken bot in the image
         """
         self.state_time += 1
-        turn_angle = 2.5 #rad/sec
+        turn_angle = 2.4 #rad/sec
         turn_time = 10 #~1second
-        straight_time = 18 #~5seconds
+        straight_time = 12 #~5seconds
         if self.state_time < 5:
             return 0, 0
         if self.maneuver_state == 0:
@@ -607,7 +625,7 @@ class TailDuckNode(DTROS):
             return 0, turn_angle
         elif self.maneuver_state == 2:
             # Drive forward into the new lane
-            if self.state_time > straight_time - 15:
+            if self.state_time > straight_time:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
@@ -620,7 +638,7 @@ class TailDuckNode(DTROS):
             return 0, -turn_angle
         elif self.maneuver_state == 4:
             # Continue driving to pass the broken bot
-            if self.state_time > straight_time-8:
+            if self.state_time > straight_time:
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0.25, 0
@@ -630,18 +648,18 @@ class TailDuckNode(DTROS):
                 self.maneuver_state += 1
                 self.state_time = 0
             return 0, -turn_angle
-        elif self.maneuver_state == 6:
-            # Move straight back towards center
-            if self.state_time > straight_time-15:
-                self.maneuver_state += 1
-                self.state_time = 0
-            return 0.25, 0
-        elif self.maneuver_state == 7:
-            # Final alignement with original direction
-            if self.state_time > turn_time:
-                self.maneuver_state += 1
-                self.state_time = 0
-            return 0, turn_angle
+        # elif self.maneuver_state == 6:
+        #     # Move straight back towards center
+        #     if self.state_time > straight_time-15:
+        #         self.maneuver_state += 1
+        #         self.state_time = 0
+        #     return 0.25, 0
+        # elif self.maneuver_state == 7:
+        #     # Final alignement with original direction
+        #     if self.state_time > turn_time:
+        #         self.maneuver_state += 1
+        #         self.state_time = 0
+        #     return 0, turn_angle
         else:
             # Maneuver complete
             self.detection_stage = 2
@@ -649,12 +667,13 @@ class TailDuckNode(DTROS):
             self.state_time = 0
             self.maneuver_state = 0
             return 0.2, 0
+
 ###################################################################################################################
 
     def image_callback(self, msg):
         image_cv = self.bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
         now = rospy.Time.now()
-
+        
         if self.count<1:
             self.set_led_color(self.light_color_list)
             # self.init_image_sub()
@@ -664,41 +683,95 @@ class TailDuckNode(DTROS):
             return
         self.last_stamp = now
 
-        # ------------------- Manuever broken bot logic -----------------------
-        broken_bot, dist = self.detect_broken_bot(image_cv)
-        # if self.red_stops_count => 5:
-        if self.stop_bot or self.maneuvering:
-            if self.maneuvering:
-                vel, omega = self.maneuver_around_bot()
-                self.nav.publish_velocity(vel, omega)
-                return
-            elif self.detection_stage == 1: 
-                rospy.loginfo("Checking for broken bot...")
-                if broken_bot and dist < 30:
-                    rospy.loginfo(f"Broken bot detected at {dist:.1f}cm — initiating maneuver")
-                    self.maneuvering = True
-                    vel, omega = self.maneuver_around_bot()
-                    self.nav.publish_velocity(vel, omega)
-                    return
-            else: # Only stop, no maneuver and no detect broken bot
+        # ------------------- Manuever broken bot logic -------------------------
+        if self.maneuvering:
+            vel, omega = self.maneuver_around_bot()
+            self.nav.publish_velocity(vel, omega)
+            return
+
+        broken_bot = self.detect_broken_bot(image_cv)
+        if broken_bot and self.detection_stage == 1:
+            rospy.loginfo(f"Broken bot detected — initiating maneuver")
+            self.maneuvering = True
+            vel, omega = self.maneuver_around_bot()
+            self.nav.publish_velocity(vel, omega)
+            return
+        else:
+            if self.stop_bot:
                 self.nav.publish_velocity(0,0)
                 return
-        #else:
-            # if self.stop_bot:
-            #     self.nav.publish_velocity(0,0)
-            #     return
+        # ------------------------------------------------------------------------
 
-        # Detect the apriltag in the image
-        # tag_id = None
-        tag_id = self.detect_apriltag(image_cv)
+        # -------------------- Crosswalk logic -----------------------------------
+        if self.red_stops_count => 5:
+            rospy.loginfo(self.detection_stage)
+            if self.detection_stage in [0, 2]: 
+                if self.detect_crosswalks or self.stop_time < 10:
+                    stopwalk_detection, _ = self.detect_crosswalk(image_cv)
+                    if stopwalk_detection:
+                        rospy.loginfo("Crosswalk detected - stopping...")
+                        self.detect_crosswalks = False
+                        vel = 0
+                        self.nav.publish_velocity(vel, 0)
+                        self.stop_time += 1
+                        self.blue_cooldown_duration = 15
+                        return
+                else:
+                    if self.detect_ducks(image_cv):
+                        rospy.loginfo("Ducks detected - waiting...")
+                        vel = 0
+                        self.nav.publish_velocity(vel, 0)
+                        return
+                    elif self.drive_dist < 10:
+                        rospy.loginfo("Driving through crosswalk")
+                        # vel = 0.5
+                        self.drive_dist += 1
+                    else:
+                        rospy.loginfo("Crosswalk complete - resuming lane following...")
+                        self.detection_stage += 1
+                        self.detect_crosswalks = True
+                        self.drive_dist = 0
+                        self.stop_time = 0
+                        self.blue_cooldown_duration = 15
+                        self.stopped_at_crosswalk = False
+        # -----------------------------------------------------------------------------
+
+        # # ------------------- Manuever broken bot logic -----------------------
+        # broken_bot, dist = self.detect_broken_bot(image_cv)
+        # # if self.red_stops_count => 5:
+        # if self.detection_stage==1 and ((broken_bot and dist < 10) or self.maneuvering) and ((rospy.get_time() - self.time_of_blue_stop) > self.blue_cooldown_duration):
+        #     if self.maneuvering:
+        #         vel, omega = self.maneuver_around_bot()
+        #         self.nav.publish_velocity(vel, omega)
+        #         return
+        #     elif self.detection_stage == 1: 
+        #         rospy.loginfo("Checking for broken bot...")
+        #         if broken_bot and dist < 10:
+        #             rospy.loginfo(f"Broken bot detected at {dist:.1f}cm — initiating maneuver")
+        #             self.maneuvering = True
+        #             vel, omega = self.maneuver_around_bot()
+        #             self.nav.publish_velocity(vel, omega)
+        #             return
+        #     else: # Only stop, no maneuver and no detect broken bot
+        #         # rospy.loginfo("stop Callback")
+        #         self.nav.publish_velocity(0,0)
+        #         return
+        # #else:
+        #     # if self.stop_bot:
+        #     #     self.nav.publish_velocity(0,0)
+        #     #     return
+
+        # # Detect the apriltag in the image
+        # # tag_id = None
+        # tag_id = self.detect_apriltag(image_cv)
         
-        # Always stop at red if not stopped already
-        stopline_detected, distance = self.detect_red_intersection(image_cv)
+        # # Always stop at red if not stopped already
+        # stopline_detected, distance = self.detect_red_intersection(image_cv)
 
-        if stopline_detected and distance < 50:
-            blue_direction = self.detect_blue_bot(image_cv)
-            if blue_direction is not None:
-                self.blue_direction = blue_direction
+        # if stopline_detected and distance < 50:
+        #     blue_direction = self.detect_blue_bot(image_cv)
+        #     if blue_direction is not None:
+        #         self.blue_direction = blue_direction
 
         # if stopline_detected and distance < 20 and (rospy.get_time() - self.time_of_red_stop) > self.red_cooldown_duration:
         #     self.stop_at_red()
@@ -768,34 +841,38 @@ class TailDuckNode(DTROS):
 
             # rospy.loginfo(self.red_stops_count)
         
-        # ------------------- Crosswalk logic ----------------------------------
-        # if self.red_stops_count => 5:
-        if self.detection_stage in [0, 2]: 
-            if self.detect_crosswalks or self.stop_time < 10:
-                stopwalk_detection, _ = self.detect_line(image_cv)
-                if stopwalk_detection:
-                    rospy.loginfo("Crosswalk detected - stopping...")
-                    self.detect_crosswalks = False
-                    vel = 0
-                    self.nav.publish_velocity(vel, 0)
-                    self.stop_time += 1
-                    return
-            else:
-                if self.detect_ducks(image_cv):
-                    rospy.loginfo("Ducks detected - waiting...")
-                    vel = 0
-                    self.nav.publish_velocity(vel, 0)
-                    return
-                # elif self.drive_dist < 10:
-                #     rospy.loginfo("Driving through crosswalk")
-                #     # vel = 0.5
-                #     self.drive_dist += 1
-                else:
-                    rospy.loginfo("Crosswalk complete - resuming lane following...")
-                    self.detection_stage += 1
-                    self.detect_crosswalks = True
-                    self.drive_dist = 0
-                    self.stop_time = 0
+        # # # ------------------- Crosswalk logic ----------------------------------
+        # # # if self.red_stops_count => 5:
+        # rospy.loginfo(self.detection_stage)
+        # if self.detection_stage in [0, 2]: 
+        #     if self.detect_crosswalks or self.stop_time < 10:
+        #         stopwalk_detection, _ = self.detect_crosswalk(image_cv)
+        #         if stopwalk_detection:
+        #             rospy.loginfo("Crosswalk detected - stopping...")
+        #             self.detect_crosswalks = False
+        #             vel = 0
+        #             self.nav.publish_velocity(vel, 0)
+        #             self.stop_time += 1
+        #             self.blue_cooldown_duration = 15
+        #             return
+        #     else:
+        #         if self.detect_ducks(image_cv):
+        #             rospy.loginfo("Ducks detected - waiting...")
+        #             vel = 0
+        #             self.nav.publish_velocity(vel, 0)
+        #             return
+        #         elif self.drive_dist < 10:
+        #             rospy.loginfo("Driving through crosswalk")
+        #             # vel = 0.5
+        #             self.drive_dist += 1
+        #         else:
+        #             rospy.loginfo("Crosswalk complete - resuming lane following...")
+        #             self.detection_stage += 1
+        #             self.detect_crosswalks = True
+        #             self.drive_dist = 0
+        #             self.stop_time = 0
+        #             self.blue_cooldown_duration = 15
+        #             self.stopped_at_crosswalk = False
             
         # lane-follow if bot not seen
         if ((now - self.last_seen) >= self.tail_timeout):
