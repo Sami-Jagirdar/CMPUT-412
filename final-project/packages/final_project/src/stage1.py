@@ -747,69 +747,58 @@ class TailDuckNode(DTROS):
     def align_to_parking_tag(self, image_cv, tags):
         """
         Continuous P‑control on yaw AND distance until both errors are within tolerance.
-        Always publishes an annotated debug image.
+        Uses a short “stale‐detection” window so occasional misses won’t trigger a re-search.
         """
         debug = image_cv.copy()
         img_cx = image_cv.shape[1] / 2.0
+        now    = rospy.Time.now()
 
-        # — If we’ve already finished, just hold v=0, ω=0 —
-        if self.parking_aligned:
-            self.nav.publish_velocity(0.0, 0.0)
-            cv2.putText(debug, "PARKING COMPLETE ✓", (10,30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-            return self._publish_parking_debug(debug)
+        # 1) Look for a fresh detection in this frame
+        target = None
+        if tags:
+            for t in tags:
+                if t.tag_id == self.expected_tag_id:
+                    target = t
+                    break
 
-        # 1) Detect AprilTags
-        # gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-        # tags = self.detector.detect(gray)
+        # 2) If we got one, update our “last seen” cache
+        if target:
+            self.last_tag_detect    = target
+            self.last_tag_detect_ts = now
+        else:
+            # 3) If we haven’t seen it for more than tag_lost_timeout, give up
+            if (now - self.last_tag_detect_ts) < self.tag_lost_timeout:
+                target = self.last_tag_detect  # reuse stale detection
 
-        # 2) Find the tag we care about
-        if tags is None:
-            ω = self.search_omega
-            v = 0.0
-            cv2.putText(debug, f"SEARCHING tag {self.expected_tag_id}", (10,30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
-            self.nav.publish_velocity(v, ω)
-            return self._publish_parking_debug(debug)
-        
-        target = next((t for t in tags if t.tag_id == self.expected_tag_id), None)
+        # 4) If still no target at all, spin to search
         if target is None:
-            # not in view → spin in place
             ω = self.search_omega
-            v = 0.0
+            self.nav.publish_velocity(0.0, ω)
             cv2.putText(debug, f"SEARCHING tag {self.expected_tag_id}", (10,30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
-            self.nav.publish_velocity(v, ω)
-            # rospy.sleep(0.1)
-            # self.nav.publish_velocity(0,0)
             return self._publish_parking_debug(debug)
 
-        # 3) Draw bounding box + center point
+        # 5) Draw bounding box + compute errors
         corners = np.int32(target.corners).reshape(-1,1,2)
         cv2.polylines(debug, [corners], True, (0,255,0), 2)
-        cX, cY = int(target.center[0]), int(target.center[1])
-        cv2.circle(debug, (cX,cY), 5, (0,255,0), -1)
+        cX, cY = map(int, target.center)
+        cv2.circle(debug, (cX, cY), 5, (0,255,0), -1)
 
-        # 4) Compute yaw error (pixels) & size error (pixels)
         err_x    = target.center[0] - img_cx
         w_px     = float(np.linalg.norm(target.corners[0] - target.corners[1]))
         err_size = self.TAG_TARGET_WIDTH - w_px
 
-        # 5) Compute ω from yaw error
+        # 6) Compute ω and v
         ω = -self.Kp_angle * err_x
         ω = max(min(ω, self.max_omega), -self.max_omega)
 
-        # 6) Compute v from size error **only if** yaw is already within tolerance
-        if abs(err_x) <= self.YAW_TOL_PX + 20:
+        if abs(err_x) <= self.YAW_TOL_PX + 20 or abs(ω) < 0.3:
             v = self.Kp_forward * err_size
-            if v > 0:
-                v = min(max(v, self.min_forward), self.max_forward)
-            else:
-                v = 0.0
+            v = min(max(v, self.min_forward), self.max_forward) if v > 0 else 0.0
         else:
             v = 0.0
 
-        # 7) If **both** errors are small, we’re done
+        # 7) Check for completion
         if abs(err_x) <= self.YAW_TOL_PX and abs(err_size) <= self.SIZE_TOL_PX:
             self.parking_aligned = True
             v = 0.0
@@ -817,17 +806,17 @@ class TailDuckNode(DTROS):
             cv2.putText(debug, "ALIGNED & PARKED ✓", (10,60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
 
-        # 8) Publish velocities
+        # 8) Publish
         self.nav.publish_velocity(v, ω)
 
-        # 9) Annotate debug info
+        # 9) Annotate debug stats
         cv2.putText(debug, f"ID:{self.expected_tag_id}",       (10,30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,0), 2)
-        cv2.putText(debug, f"err_x:{err_x:.1f}px",           (10,60),
+        cv2.putText(debug, f"err_x:{err_x:.1f}px",           (10,90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,0), 2)
-        cv2.putText(debug, f"err_size:{err_size:.1f}px",     (10,90),
+        cv2.putText(debug, f"err_size:{err_size:.1f}px",     (10,120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,0), 2)
-        cv2.putText(debug, f"v:{v:.3f}  ω:{ω:.3f}",           (10,120),
+        cv2.putText(debug, f"v:{v:.3f}  ω:{ω:.3f}",           (10,150),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,0), 2)
 
         # 10) Publish debug image
