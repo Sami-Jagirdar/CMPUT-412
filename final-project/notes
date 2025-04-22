@@ -1,1 +1,45 @@
 test
+# ------------------- Manuever broken bot logic -----------------------
+        # self.detection_stage = 1
+        # self.red_stops_count = 5
+        # if self.red_stops_count >= 5 and self.detection_stage == 1:
+        #     broken_bot = self.detect_broken_bot_cropped(image_cv)
+        #     if broken_bot or self.maneuvering:
+        #         # If already maneuvering
+        #         if self.maneuvering:
+        #             if broken_bot:
+        #                 self.time_of_bot_not_in_vision = rospy.Time.now()
+        #                 self.lane_detect(image_cv, opposite=True)
+        #                 if self.proportional is not None:
+        #                     self.update_pid(self.proportional)
+        #                 else:
+        #                     self.omega = 0
+        #                     self.last_error = 0
+        #                     self.integral = 0
+
+        #                 rospy.loginfo(f"[Manuevering around bot] v={self.velocity:.2f}, omega={self.omega:.2f}")
+        #                 self.nav.publish_velocity(self.velocity, self.omega)
+        #                 return
+        #             elif (now - self.time_of_bot_not_in_vision) < self.maneuver_timeout:
+        #                 self.lane_detect(image_cv, opposite=True)
+        #                 if self.proportional is not None:
+        #                     self.update_pid(self.proportional)
+        #                 else:
+        #                     self.omega = 0
+        #                     self.last_error = 0
+        #                     self.integral = 0
+
+        #                 rospy.loginfo(f"[Manuevering around bot] v={self.velocity:.2f}, omega={self.omega:.2f}")
+        #                 self.nav.publish_velocity(self.velocity, self.omega)
+        #                 return
+        #             else:
+        #                 self.maneuvering = False
+        #         else:
+        #             self.nav.publish_velocity(0,0)
+        #             rospy.loginfo("[Just found Broken Bot]")
+        #             # broken_bot = self.detect_broken_bot_cropped(image_cv)
+        #             if broken_bot:
+        #                 self.maneuvering = True
+        #                 self.nav.stop(2)
+        #             return
+        # ---------------------------------------------------------------------

@@ -1,7 +1,9 @@
 <launch>
 
+  <!-- <arg name="id" default="1" doc="Parking stall"/> -->
+
   <group ns="$(arg veh)">
-    <node pkg="final_project" type="stage1.py" name="tail_duck_node" output="screen"/>
+    <node pkg="final_project" type="stage1.py" name="tail_duck_node" output="screen" args="--id 2"/>
   </group>
 
 </launch>
