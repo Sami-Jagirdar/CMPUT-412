@@ -95,9 +95,9 @@ class TailDuckNode(DTROS):
         # — continuous control gains & thresholds —
         self.search_omega      = -2.1   # spin speed while searching
         self.Kp_angle          = 0.02   # ω = Kp_angle * err_x
-        self.max_omega         = 1.1
+        self.max_omega         = 1.5
 
-        self.Kp_forward        = 0.01   # v = Kp_forward * err_size
+        self.Kp_forward        = 0.008   # v = Kp_forward * err_size
         self.max_forward       = 0.1
         self.min_forward       = 0.02
 
@@ -114,6 +114,18 @@ class TailDuckNode(DTROS):
             CompressedImage,
             queue_size=1
         )
+        self.white_debug_pub = rospy.Publisher(
+            f"/{self.veh}/white_lane/debug/compressed",
+            CompressedImage, queue_size=1
+        )
+
+        # tuning
+        self.drive_speed   = 0.1    # m/s
+        self.Kp_lane       = 0.001   # rad/s per px of error
+        self.max_lane_omega = 0.8    # cap your steering
+        self.white_stop_dist = 30.0  # same as before
+
+        # -------------------------------------------------------------
 
         self.bridge = CvBridge()
         self.jpeg = TurboJPEG()
@@ -153,7 +165,6 @@ class TailDuckNode(DTROS):
 
         rospy.on_shutdown(self.hook)
 
-
     def camera_info_callback(self, msg):
         self.camera_calibration = msg
         currRawImage_height = 640
@@ -184,7 +195,6 @@ class TailDuckNode(DTROS):
             # print("== Camera Info Subscriber successfully killed ==")
         except BaseException:
             pass
-
 
     def detect_apriltag(self, image_cv):
         """
@@ -759,10 +769,6 @@ class TailDuckNode(DTROS):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
             return self._publish_parking_debug(debug)
 
-        # 1) Detect AprilTags
-        # gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-        # tags = self.detector.detect(gray)
-
         # 2) Find the tag we care about
         if tags is None:
             ω = self.search_omega
@@ -780,8 +786,6 @@ class TailDuckNode(DTROS):
             cv2.putText(debug, f"SEARCHING tag {self.expected_tag_id}", (10,30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
             self.nav.publish_velocity(v, ω)
-            # rospy.sleep(0.1)
-            # self.nav.publish_velocity(0,0)
             return self._publish_parking_debug(debug)
 
         # 3) Draw bounding box + center point
@@ -800,7 +804,7 @@ class TailDuckNode(DTROS):
         ω = max(min(ω, self.max_omega), -self.max_omega)
 
         # 6) Compute v from size error **only if** yaw is already within tolerance
-        if abs(err_x) <= self.YAW_TOL_PX + 20:
+        if abs(err_x) <= self.YAW_TOL_PX + 20 or ω < 0.4:
             v = self.Kp_forward * err_size
             if v > 0:
                 v = min(max(v, self.min_forward), self.max_forward)
@@ -814,11 +818,12 @@ class TailDuckNode(DTROS):
             self.parking_aligned = True
             v = 0.0
             ω = 0.0
-            cv2.putText(debug, "ALIGNED & PARKED ✓", (10,60),
+            cv2.putText(debug, "ALIGNED & PARKED", (10,60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
 
         # 8) Publish velocities
         self.nav.publish_velocity(v, ω)
+        self.nav.publish_velocity(0,0)
 
         # 9) Annotate debug info
         cv2.putText(debug, f"ID:{self.expected_tag_id}",       (10,30),
@@ -839,6 +844,84 @@ class TailDuckNode(DTROS):
         msg.header.stamp = rospy.Time.now()
         self.parking_debug_pub.publish(msg)
         return True
+    
+    def detect_white_lane(self, image_cv):
+        """
+        Returns (found, dist, centroid_error, debug_img).
+        dist: same as before
+        centroid_error: +ve if the white blob is to the right of center
+        """
+        hsv = cv2.cvtColor(image_cv, cv2.COLOR_BGR2HSV)
+        # pick bright white
+        white_lower = np.array([0,  0, 200], np.uint8)
+        white_upper = np.array([180, 30,255], np.uint8)
+        mask = cv2.inRange(hsv, white_lower, white_upper)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        debug = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        img_w = image_cv.shape[1]
+        img_h = image_cv.shape[0]
+
+        if not contours:
+            return False, float('inf'), None, debug
+
+        c = max(contours, key=cv2.contourArea)
+        x,y,w,h = cv2.boundingRect(c)
+        # distance (bottom of blob → bottom of image)
+        dist = (img_h - (y+h)) / img_h * 100.0
+
+        # centroid of that white patch, in full‐image coords:
+        M = cv2.moments(c)
+        if M['m00'] == 0:
+            return True, dist, None, debug
+        cx = int(M['m10'] / M['m00'])
+
+        # compute pixel error from center line
+        err = cx - (img_w / 2.0)
+
+        # annotate
+        cv2.rectangle(debug, (x,y), (x+w, y+h), (0,255,0), 2)
+        cv2.circle(debug, (cx, y + h//2), 5, (0,0,255), -1)
+        cv2.line(debug,
+                 (int(img_w/2), 0),
+                 (int(img_w/2), img_h),
+                 (255,0,0), 1)
+        cv2.putText(debug, f"d={dist:.1f}, err={err:.1f}px", (10,30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 2)
+
+        return True, dist, err, debug
+    
+    def drive_to_white(self, image_cv):
+        """
+        Steer & drive slowly toward the white curb.
+        Returns True once distance ≤ white_stop_dist.
+        """
+        found, dist, err, debug = self.detect_white_lane(image_cv)
+        # publish debug image
+        self.white_debug_pub.publish(
+            self.bridge.cv2_to_compressed_imgmsg(debug, 'jpeg')
+        )
+
+        # if we haven’t even seen white yet, move a hair to search
+        if not found:
+            self.nav.publish_velocity(0.1, 0)
+            return False
+
+        # once we see white but are still too far
+        if dist > self.white_stop_dist:
+            v = self.drive_speed
+            # if we got a centroid error, turn proportionally
+            if err is not None:
+                ω = -self.Kp_lane * err
+                ω = max(min(ω, self.max_lane_omega), -self.max_lane_omega)
+            else:
+                ω = 0.0
+            self.nav.publish_velocity(v, ω)
+            return False
+
+        # close enough!
+        self.nav.publish_velocity(0.0, 0.0)
+        return True
 
     #  -----------------------------------------------------------------
     
@@ -855,6 +938,12 @@ class TailDuckNode(DTROS):
         if now - self.last_stamp < self.publish_duration:
             return
         self.last_stamp = now
+
+        found, dist, err, debug = self.detect_white_lane(image_cv)
+        self.white_debug_pub.publish(
+            self.bridge.cv2_to_compressed_imgmsg(debug, 'jpeg')
+        )
+        return
 
         # ------------------- Manuever broken bot logic -----------------------
         # self.detection_stage = 1
@@ -889,9 +978,6 @@ class TailDuckNode(DTROS):
         # Always stop at red if not stopped already
         stopline_detected, distance = self.detect_red_intersection(image_cv)
         self.red_stops_count = 5
-        if self.red_stops_count == 5 and self.parking:
-            if self.align_to_parking_tag(image_cv, tags):
-                return
         
         if stopline_detected and distance < 50:
             blue_direction = self.detect_blue_bot(image_cv)
@@ -969,21 +1055,37 @@ class TailDuckNode(DTROS):
                 self.red_stops_count += 1
 
             elif self.red_stops_count == 5:
-                # Stage 4 Parking
-                if self.expected_tag_id == 44:
-                    self.nav.move_straight(0.7, 0.2)
-                elif self.expected_tag_id == 58:
-                    self.nav.move_straight(1.5, 0.2)
-                elif self.expected_tag_id == 13:
-                    self.nav.move_straight(0.7, 0.2)
-                elif self.expected_tag_id == 37:
-                    self.nav.move_straight(1.5, 0.2)
+                self.nav.turn_left(0, 1.5)
+                self.nav.move_straight(0.2)
+            #     # Stage 4 Parking
+            #     if self.expected_tag_id == 44:
+            #         self.nav.move_straight(0.7, 0.2)
+            #     elif self.expected_tag_id == 58:
+            #         self.nav.move_straight(1.5, 0.2)
+            #     elif self.expected_tag_id == 13:
+            #         self.nav.move_straight(0.7, 0.2)
+            #     elif self.expected_tag_id == 37:
+            #         self.nav.move_straight(1.5, 0.2)
 
-                self.parking = True
-                if self.align_to_parking_tag(image_cv, tags):
-                    return
+            #     self.parking = True
+            #     if self.align_to_parking_tag(image_cv, tags):
+            #         return
 
             rospy.loginfo(self.red_stops_count)
+        
+        if self.red_stops_count == 5:
+            if not self.drive_to_lane:
+                self.drive_to_lane = True
+
+            if self.drive_to_lane and not self.parking:
+                # now uses steer+drive to line, not v-only
+                if self.drive_to_white(image_cv):
+                    self.parking = True
+                return
+
+            if self.parking:
+                self.align_to_parking_tag(image_cv, tags)
+                return
 
         # ------------------- Crosswalk logic ----------------------------------
         # if self.red_stops_count >= 5:
